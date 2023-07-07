@@ -40,24 +40,12 @@ class MarkingStateBase {
 #endif  // V8_COMPRESS_POINTERS
   }
 
-  V8_INLINE MarkBit MarkBitFrom(const HeapObject obj) const;
-
-  // {addr} may be tagged or aligned.
-  V8_INLINE MarkBit MarkBitFrom(const BasicMemoryChunk* p, Address addr) const;
-
-  V8_INLINE bool IsImpossible(const HeapObject obj) const;
-  V8_INLINE bool IsGrey(const HeapObject obj) const;
-  V8_INLINE bool IsBlackOrGrey(const HeapObject obj) const;
-  V8_INLINE bool GreyToBlack(HeapObject obj);
-
   V8_INLINE bool TryMark(HeapObject obj);
   // Helper method for fully marking an object and accounting its live bytes.
   // Should be used to mark individual objects in one-off cases.
   V8_INLINE bool TryMarkAndAccountLiveBytes(HeapObject obj);
   V8_INLINE bool IsMarked(const HeapObject obj) const;
   V8_INLINE bool IsUnmarked(const HeapObject obj) const;
-
-  V8_INLINE void ClearLiveness(MemoryChunk* chunk);
 
   void AddStrongReferenceForReferenceSummarizer(HeapObject host,
                                                 HeapObject obj) {
@@ -80,17 +68,6 @@ class MarkingState final
  public:
   explicit MarkingState(PtrComprCageBase cage_base)
       : MarkingStateBase(cage_base) {}
-
-  V8_INLINE ConcurrentBitmap<AccessMode::ATOMIC>* bitmap(
-      const BasicMemoryChunk* chunk) const;
-
-  // Concurrent marking uses local live bytes so we may do these accesses
-  // non-atomically.
-  V8_INLINE void IncrementLiveBytes(MemoryChunk* chunk, intptr_t by);
-
-  V8_INLINE intptr_t live_bytes(const MemoryChunk* chunk) const;
-
-  V8_INLINE void SetLiveBytes(MemoryChunk* chunk, intptr_t value);
 };
 
 class NonAtomicMarkingState final
@@ -98,29 +75,6 @@ class NonAtomicMarkingState final
  public:
   explicit NonAtomicMarkingState(PtrComprCageBase cage_base)
       : MarkingStateBase(cage_base) {}
-
-  V8_INLINE ConcurrentBitmap<AccessMode::NON_ATOMIC>* bitmap(
-      const BasicMemoryChunk* chunk) const;
-
-  V8_INLINE void IncrementLiveBytes(MemoryChunk* chunk, intptr_t by);
-
-  V8_INLINE intptr_t live_bytes(const MemoryChunk* chunk) const;
-
-  V8_INLINE void SetLiveBytes(MemoryChunk* chunk, intptr_t value);
-};
-
-// This is used by Scavenger and Evacuator in TransferColor.
-// Live byte increments have to be atomic.
-class AtomicMarkingState final
-    : public MarkingStateBase<AtomicMarkingState, AccessMode::ATOMIC> {
- public:
-  explicit AtomicMarkingState(PtrComprCageBase cage_base)
-      : MarkingStateBase(cage_base) {}
-
-  V8_INLINE ConcurrentBitmap<AccessMode::ATOMIC>* bitmap(
-      const BasicMemoryChunk* chunk) const;
-
-  V8_INLINE void IncrementLiveBytes(MemoryChunk* chunk, intptr_t by);
 };
 
 }  // namespace internal

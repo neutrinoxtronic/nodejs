@@ -164,7 +164,7 @@ class FunctionTemplateInfo
   bool IsLeafTemplateForApiObject(Object object) const;
   inline bool instantiated();
 
-  bool BreakAtEntry();
+  bool BreakAtEntry(Isolate* isolate);
   bool HasInstanceType();
 
   // Helper function for cached accessors.
@@ -185,6 +185,10 @@ class FunctionTemplateInfo
   using BodyDescriptor = StructBodyDescriptor;
 
  private:
+  // For ease of use of the BITFIELD macro.
+  inline int32_t relaxed_flag() const;
+  inline void set_relaxed_flag(int32_t flags);
+
   static constexpr int kNoJSApiObjectType = 0;
   static inline FunctionTemplateRareData EnsureFunctionTemplateRareData(
       Isolate* isolate, Handle<FunctionTemplateInfo> function_template_info);

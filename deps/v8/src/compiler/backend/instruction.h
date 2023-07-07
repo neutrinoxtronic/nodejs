@@ -31,6 +31,10 @@ namespace compiler {
 class Schedule;
 class SourcePositionTable;
 
+namespace turboshaft {
+class Graph;
+}
+
 #if defined(V8_CC_MSVC) && defined(V8_TARGET_ARCH_IA32)
 // MSVC on x86 has issues with ALIGNAS(8) on InstructionOperand, but does
 // align the object to 8 bytes anyway (covered by a static assert below).
@@ -1254,6 +1258,8 @@ enum class StateValueKind : uint8_t {
   kDuplicate
 };
 
+std::ostream& operator<<(std::ostream& os, StateValueKind kind);
+
 class StateValueDescriptor {
  public:
   StateValueDescriptor()
@@ -1309,6 +1315,8 @@ class StateValueDescriptor {
     DCHECK(kind_ == StateValueKind::kArgumentsElements);
     return args_type_;
   }
+
+  void Print(std::ostream& os) const;
 
  private:
   StateValueDescriptor(StateValueKind kind, MachineType type)
@@ -1454,6 +1462,9 @@ class FrameStateDescriptor : public ZoneObject {
            type_ == FrameStateType::kBuiltinContinuation ||
 #if V8_ENABLE_WEBASSEMBLY
            type_ == FrameStateType::kJSToWasmBuiltinContinuation ||
+           // TODO(mliedtke): Should we skip the context for the FrameState of
+           // inlined wasm functions?
+           type_ == FrameStateType::kWasmInlinedIntoJS ||
 #endif  // V8_ENABLE_WEBASSEMBLY
            type_ == FrameStateType::kConstructStub;
   }
@@ -1621,6 +1632,8 @@ class V8_EXPORT_PRIVATE InstructionBlock final
   inline bool IsLoopHeaderInAssemblyOrder() const {
     return loop_header_alignment_;
   }
+  bool omitted_by_jump_threading() const { return omitted_by_jump_threading_; }
+  void set_omitted_by_jump_threading() { omitted_by_jump_threading_ = true; }
 
   using Predecessors = ZoneVector<RpoNumber>;
   Predecessors& predecessors() { return predecessors_; }
@@ -1679,6 +1692,7 @@ class V8_EXPORT_PRIVATE InstructionBlock final
   bool needs_frame_ : 1;
   bool must_construct_frame_ : 1;
   bool must_deconstruct_frame_ : 1;
+  bool omitted_by_jump_threading_ : 1;  // Just for cleaner code comments.
 };
 
 class InstructionSequence;
@@ -1705,6 +1719,8 @@ class V8_EXPORT_PRIVATE InstructionSequence final
  public:
   static InstructionBlocks* InstructionBlocksFor(Zone* zone,
                                                  const Schedule* schedule);
+  static InstructionBlocks* InstructionBlocksFor(
+      Zone* zone, const turboshaft::Graph& graph);
   InstructionSequence(Isolate* isolate, Zone* zone,
                       InstructionBlocks* instruction_blocks);
   InstructionSequence(const InstructionSequence&) = delete;

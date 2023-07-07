@@ -15,6 +15,7 @@
 #include "src/heap/marking-barrier-inl.h"
 #include "src/heap/marking-worklist-inl.h"
 #include "src/heap/marking-worklist.h"
+#include "src/heap/minor-mark-sweep.h"
 #include "src/heap/safepoint.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/js-array-buffer.h"
@@ -26,7 +27,7 @@ namespace internal {
 MarkingBarrier::MarkingBarrier(LocalHeap* local_heap)
     : heap_(local_heap->heap()),
       major_collector_(heap_->mark_compact_collector()),
-      minor_collector_(heap_->minor_mark_compact_collector()),
+      minor_collector_(heap_->minor_mark_sweep_collector()),
       incremental_marking_(heap_->incremental_marking()),
       major_worklist_(*major_collector_->marking_worklists()->shared()),
       minor_worklist_(*minor_collector_->marking_worklists()->shared()),
@@ -42,6 +43,11 @@ void MarkingBarrier::Write(HeapObject host, HeapObjectSlot slot,
   DCHECK(IsCurrentMarkingBarrier(host));
   DCHECK(is_activated_ || shared_heap_worklist_.has_value());
   DCHECK(MemoryChunk::FromHeapObject(host)->IsMarking());
+
+  if (!marking_state_.IsMarked(host) &&
+      (is_major() || Heap::InYoungGeneration(host)))
+    return;
+
   MarkValue(host, value);
 
   if (slot.address() && IsCompacting(host)) {
@@ -71,15 +77,20 @@ void MarkingBarrier::Write(InstructionStream host, RelocInfo* reloc_info,
   DCHECK(!host.InWritableSharedSpace());
   DCHECK(is_activated_ || shared_heap_worklist_.has_value());
   DCHECK(MemoryChunk::FromHeapObject(host)->IsMarking());
+
+  if (!marking_state_.IsMarked(host) &&
+      (is_major() || Heap::InYoungGeneration(host)))
+    return;
+
   MarkValue(host, value);
   if (is_compacting_) {
     DCHECK(is_major());
     if (is_main_thread_barrier_) {
       // An optimization to avoid allocating additional typed slots for the
       // main thread.
-      major_collector_->RecordRelocSlot(reloc_info, value);
+      major_collector_->RecordRelocSlot(host, reloc_info, value);
     } else {
-      RecordRelocSlot(reloc_info, value);
+      RecordRelocSlot(host, reloc_info, value);
     }
   }
 }
@@ -89,6 +100,10 @@ void MarkingBarrier::Write(JSArrayBuffer host,
   DCHECK(IsCurrentMarkingBarrier(host));
   DCHECK(!host.InWritableSharedSpace());
   DCHECK(MemoryChunk::FromHeapObject(host)->IsMarking());
+
+  if (!marking_state_.IsMarked(host) &&
+      (is_major() || Heap::InYoungGeneration(host)))
+    return;
 
   if (is_minor()) {
     if (Heap::InYoungGeneration(host)) {
@@ -133,10 +148,7 @@ void MarkingBarrier::Write(DescriptorArray descriptor_array,
   // marking visitor does not re-process any already marked descriptors. If we
   // don't mark it black here, the Scavenger may promote a DescriptorArray and
   // any already marked descriptors will not have any slots recorded.
-  if (!marking_state_.IsMarked(descriptor_array)) {
-    marking_state_.TryMark(descriptor_array);
-    marking_state_.GreyToBlack(descriptor_array);
-  }
+  marking_state_.TryMark(descriptor_array);
 
   // `TryUpdateIndicesToMark()` acts as a barrier that publishes the slots'
   // values corresponding to `number_of_own_descriptors`.
@@ -146,12 +158,13 @@ void MarkingBarrier::Write(DescriptorArray descriptor_array,
   }
 }
 
-void MarkingBarrier::RecordRelocSlot(RelocInfo* rinfo, HeapObject target) {
-  DCHECK(IsCurrentMarkingBarrier(rinfo->instruction_stream()));
-  if (!MarkCompactCollector::ShouldRecordRelocSlot(rinfo, target)) return;
+void MarkingBarrier::RecordRelocSlot(InstructionStream host, RelocInfo* rinfo,
+                                     HeapObject target) {
+  DCHECK(IsCurrentMarkingBarrier(host));
+  if (!MarkCompactCollector::ShouldRecordRelocSlot(host, rinfo, target)) return;
 
   MarkCompactCollector::RecordRelocSlotInfo info =
-      MarkCompactCollector::ProcessRelocInfo(rinfo, target);
+      MarkCompactCollector::ProcessRelocInfo(host, rinfo, target);
 
   auto& typed_slots = typed_slots_map_[info.memory_chunk];
   if (!typed_slots) {
@@ -356,19 +369,11 @@ void MarkingBarrier::PublishAll(Heap* heap) {
 void MarkingBarrier::PublishIfNeeded() {
   if (is_activated_) {
     current_worklist_->Publish();
-    base::Optional<CodePageHeaderModificationScope> optional_rwx_write_scope;
-    if (!typed_slots_map_.empty()) {
-      optional_rwx_write_scope.emplace(
-          "Merging typed slots may require allocating a new typed slot set.");
-    }
     for (auto& it : typed_slots_map_) {
       MemoryChunk* memory_chunk = it.first;
       // Access to TypeSlots need to be protected, since LocalHeaps might
       // publish code in the background thread.
-      base::Optional<base::MutexGuard> opt_guard;
-      if (v8_flags.concurrent_sparkplug) {
-        opt_guard.emplace(memory_chunk->mutex());
-      }
+      base::MutexGuard guard(memory_chunk->mutex());
       std::unique_ptr<TypedSlots>& typed_slots = it.second;
       RememberedSet<OLD_TO_OLD>::MergeTyped(memory_chunk,
                                             std::move(typed_slots));

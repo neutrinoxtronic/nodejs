@@ -952,13 +952,17 @@ void MacroAssembler::Sle(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
     slt(rd, rt.rm(), rs);
   } else {
-    // li handles the relocation.
-    UseScratchRegisterScope temps(this);
-    Register scratch = temps.hasAvailable() ? temps.Acquire() : t8;
-    BlockTrampolinePoolScope block_trampoline_pool(this);
-    DCHECK(rs != scratch);
-    li(scratch, rt);
-    slt(rd, scratch, rs);
+    if (rt.immediate() == 0 && !MustUseReg(rt.rmode())) {
+      slt(rd, zero_reg, rs);
+    } else {
+      // li handles the relocation.
+      UseScratchRegisterScope temps(this);
+      Register scratch = temps.hasAvailable() ? temps.Acquire() : t8;
+      BlockTrampolinePoolScope block_trampoline_pool(this);
+      DCHECK(rs != scratch);
+      li(scratch, rt);
+      slt(rd, scratch, rs);
+    }
   }
   xori(rd, rd, 1);
 }
@@ -967,13 +971,17 @@ void MacroAssembler::Sleu(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
     sltu(rd, rt.rm(), rs);
   } else {
-    // li handles the relocation.
-    UseScratchRegisterScope temps(this);
-    Register scratch = temps.hasAvailable() ? temps.Acquire() : t8;
-    BlockTrampolinePoolScope block_trampoline_pool(this);
-    DCHECK(rs != scratch);
-    li(scratch, rt);
-    sltu(rd, scratch, rs);
+    if (rt.immediate() == 0 && !MustUseReg(rt.rmode())) {
+      sltu(rd, zero_reg, rs);
+    } else {
+      // li handles the relocation.
+      UseScratchRegisterScope temps(this);
+      Register scratch = temps.hasAvailable() ? temps.Acquire() : t8;
+      BlockTrampolinePoolScope block_trampoline_pool(this);
+      DCHECK(rs != scratch);
+      li(scratch, rt);
+      sltu(rd, scratch, rs);
+    }
   }
   xori(rd, rd, 1);
 }
@@ -992,13 +1000,17 @@ void MacroAssembler::Sgt(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
     slt(rd, rt.rm(), rs);
   } else {
-    // li handles the relocation.
-    UseScratchRegisterScope temps(this);
-    Register scratch = temps.hasAvailable() ? temps.Acquire() : t8;
-    BlockTrampolinePoolScope block_trampoline_pool(this);
-    DCHECK(rs != scratch);
-    li(scratch, rt);
-    slt(rd, scratch, rs);
+    if (rt.immediate() == 0 && !MustUseReg(rt.rmode())) {
+      slt(rd, zero_reg, rs);
+    } else {
+      // li handles the relocation.
+      UseScratchRegisterScope temps(this);
+      Register scratch = temps.hasAvailable() ? temps.Acquire() : t8;
+      BlockTrampolinePoolScope block_trampoline_pool(this);
+      DCHECK(rs != scratch);
+      li(scratch, rt);
+      slt(rd, scratch, rs);
+    }
   }
 }
 
@@ -1006,13 +1018,17 @@ void MacroAssembler::Sgtu(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
     sltu(rd, rt.rm(), rs);
   } else {
-    // li handles the relocation.
-    UseScratchRegisterScope temps(this);
-    Register scratch = temps.hasAvailable() ? temps.Acquire() : t8;
-    BlockTrampolinePoolScope block_trampoline_pool(this);
-    DCHECK(rs != scratch);
-    li(scratch, rt);
-    sltu(rd, scratch, rs);
+    if (rt.immediate() == 0 && !MustUseReg(rt.rmode())) {
+      sltu(rd, zero_reg, rs);
+    } else {
+      // li handles the relocation.
+      UseScratchRegisterScope temps(this);
+      Register scratch = temps.hasAvailable() ? temps.Acquire() : t8;
+      BlockTrampolinePoolScope block_trampoline_pool(this);
+      DCHECK(rs != scratch);
+      li(scratch, rt);
+      sltu(rd, scratch, rs);
+    }
   }
 }
 
@@ -3022,98 +3038,6 @@ void MacroAssembler::Movn(Register rd, Register rs, Register rt) {
   }
 }
 
-void MacroAssembler::LoadZeroOnCondition(Register rd, Register rs,
-                                         const Operand& rt, Condition cond) {
-  BlockTrampolinePoolScope block_trampoline_pool(this);
-  switch (cond) {
-    case cc_always:
-      mov(rd, zero_reg);
-      break;
-    case eq:
-      if (rs == zero_reg) {
-        if (rt.is_reg()) {
-          LoadZeroIfConditionZero(rd, rt.rm());
-        } else {
-          if (rt.immediate() == 0) {
-            mov(rd, zero_reg);
-          } else {
-            nop();
-          }
-        }
-      } else if (IsZero(rt)) {
-        LoadZeroIfConditionZero(rd, rs);
-      } else {
-        Dsubu(t9, rs, rt);
-        LoadZeroIfConditionZero(rd, t9);
-      }
-      break;
-    case ne:
-      if (rs == zero_reg) {
-        if (rt.is_reg()) {
-          LoadZeroIfConditionNotZero(rd, rt.rm());
-        } else {
-          if (rt.immediate() != 0) {
-            mov(rd, zero_reg);
-          } else {
-            nop();
-          }
-        }
-      } else if (IsZero(rt)) {
-        LoadZeroIfConditionNotZero(rd, rs);
-      } else {
-        Dsubu(t9, rs, rt);
-        LoadZeroIfConditionNotZero(rd, t9);
-      }
-      break;
-
-    // Signed comparison.
-    case greater:
-      Sgt(t9, rs, rt);
-      LoadZeroIfConditionNotZero(rd, t9);
-      break;
-    case greater_equal:
-      Sge(t9, rs, rt);
-      LoadZeroIfConditionNotZero(rd, t9);
-      // rs >= rt
-      break;
-    case less:
-      Slt(t9, rs, rt);
-      LoadZeroIfConditionNotZero(rd, t9);
-      // rs < rt
-      break;
-    case less_equal:
-      Sle(t9, rs, rt);
-      LoadZeroIfConditionNotZero(rd, t9);
-      // rs <= rt
-      break;
-
-    // Unsigned comparison.
-    case Ugreater:
-      Sgtu(t9, rs, rt);
-      LoadZeroIfConditionNotZero(rd, t9);
-      // rs > rt
-      break;
-
-    case Ugreater_equal:
-      Sgeu(t9, rs, rt);
-      LoadZeroIfConditionNotZero(rd, t9);
-      // rs >= rt
-      break;
-    case Uless:
-      Sltu(t9, rs, rt);
-      LoadZeroIfConditionNotZero(rd, t9);
-      // rs < rt
-      break;
-    case Uless_equal:
-      Sleu(t9, rs, rt);
-      LoadZeroIfConditionNotZero(rd, t9);
-      // rs <= rt
-      break;
-    default:
-      UNREACHABLE();
-  }
-}
-
 void MacroAssembler::LoadZeroIfConditionNotZero(Register dest,
                                                 Register condition) {
   if (kArchVariant == kMips64r6) {
@@ -3345,6 +3269,72 @@ void MacroAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
   pop(ra);
 
   bind(&done);
+}
+
+void MacroAssembler::CompareWord(Condition cond, Register dst, Register lhs,
+                                 const Operand& rhs) {
+  switch (cond) {
+    case eq:
+    case ne: {
+      if (rhs.IsImmediate()) {
+        if (rhs.immediate() == 0) {
+          if (cond == eq) {
+            Sltu(dst, lhs, 1);
+          } else {
+            Sltu(dst, zero_reg, lhs);
+          }
+        } else if (is_int16(-rhs.immediate())) {
+          Daddu(dst, lhs, Operand(-rhs.immediate()));
+          if (cond == eq) {
+            Sltu(dst, dst, 1);
+          } else {
+            Sltu(dst, zero_reg, dst);
+          }
+        } else {
+          Xor(dst, lhs, rhs);
+          if (cond == eq) {
+            Sltu(dst, dst, 1);
+          } else {
+            Sltu(dst, zero_reg, dst);
+          }
+        }
+      } else {
+        Xor(dst, lhs, rhs);
+        if (cond == eq) {
+          Sltu(dst, dst, 1);
+        } else {
+          Sltu(dst, zero_reg, dst);
+        }
+      }
+      break;
+    }
+    case lt:
+      Slt(dst, lhs, rhs);
+      break;
+    case gt:
+      Sgt(dst, lhs, rhs);
+      break;
+    case le:
+      Sle(dst, lhs, rhs);
+      break;
+    case ge:
+      Sge(dst, lhs, rhs);
+      break;
+    case lo:
+      Sltu(dst, lhs, rhs);
+      break;
+    case hs:
+      Sgeu(dst, lhs, rhs);
+      break;
+    case hi:
+      Sgtu(dst, lhs, rhs);
+      break;
+    case ls:
+      Sleu(dst, lhs, rhs);
+      break;
+    default:
+      UNREACHABLE();
+  }
 }
 
 // Emulated condtional branches do not emit a nop in the branch delay slot.
@@ -4258,12 +4248,14 @@ MemOperand MacroAssembler::ExternalReferenceAsOperand(
       return MemOperand(kRootRegister, static_cast<int32_t>(offset));
     } else {
       // Otherwise, do a memory load from the external reference table.
+      DCHECK(scratch.is_valid());
       Ld(scratch, MemOperand(kRootRegister,
                              RootRegisterOffsetForExternalReferenceTableEntry(
                                  isolate(), reference)));
       return MemOperand(scratch, 0);
     }
   }
+  DCHECK(scratch.is_valid());
   li(scratch, reference);
   return MemOperand(scratch, 0);
 }
@@ -4401,17 +4393,17 @@ void MacroAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
   Call(code.address(), rmode, cond, rs, rt, bd);
 }
 
-void MacroAssembler::LoadEntryFromBuiltinIndex(Register builtin_index) {
+void MacroAssembler::LoadEntryFromBuiltinIndex(Register builtin_index,
+                                               Register target) {
   ASM_CODE_COMMENT(this);
   static_assert(kSystemPointerSize == 8);
   static_assert(kSmiTagSize == 1);
   static_assert(kSmiTag == 0);
 
   // The builtin_index register contains the builtin index as a Smi.
-  SmiUntag(builtin_index, builtin_index);
-  Dlsa(builtin_index, kRootRegister, builtin_index, kSystemPointerSizeLog2);
-  Ld(builtin_index,
-     MemOperand(builtin_index, IsolateData::builtin_entry_table_offset()));
+  SmiUntag(target, builtin_index);
+  Dlsa(target, kRootRegister, target, kSystemPointerSizeLog2);
+  Ld(target, MemOperand(target, IsolateData::builtin_entry_table_offset()));
 }
 void MacroAssembler::LoadEntryFromBuiltin(Builtin builtin,
                                           Register destination) {
@@ -4423,10 +4415,11 @@ MemOperand MacroAssembler::EntryFromBuiltinAsOperand(Builtin builtin) {
                     IsolateData::BuiltinEntrySlotOffset(builtin));
 }
 
-void MacroAssembler::CallBuiltinByIndex(Register builtin_index) {
+void MacroAssembler::CallBuiltinByIndex(Register builtin_index,
+                                        Register target) {
   ASM_CODE_COMMENT(this);
-  LoadEntryFromBuiltinIndex(builtin_index);
-  Call(builtin_index);
+  LoadEntryFromBuiltinIndex(builtin_index, target);
+  Call(target);
 }
 void MacroAssembler::CallBuiltin(Builtin builtin) {
   ASM_CODE_COMMENT_STRING(this, CommentForOffHeapTrampoline("call", builtin));
@@ -4911,8 +4904,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch1,
 void MacroAssembler::TestCodeIsMarkedForDeoptimizationAndJump(
     Register code_data_container, Register scratch, Condition cond,
     Label* target) {
-  Lhu(scratch,
-      FieldMemOperand(code_data_container, Code::kKindSpecificFlagsOffset));
+  Lwu(scratch, FieldMemOperand(code_data_container, Code::kFlagsOffset));
   And(scratch, scratch, Operand(1 << Code::kMarkedForDeoptimizationBit));
   Branch(target, cond, scratch, Operand(zero_reg));
 }
@@ -5445,7 +5437,8 @@ void MacroAssembler::EnterExitFrame(int stack_space,
                                     StackFrame::Type frame_type) {
   ASM_CODE_COMMENT(this);
   DCHECK(frame_type == StackFrame::EXIT ||
-         frame_type == StackFrame::BUILTIN_EXIT);
+         frame_type == StackFrame::BUILTIN_EXIT ||
+         frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
   static_assert(2 * kPointerSize == ExitFrameConstants::kCallerSPDisplacement);
@@ -5600,6 +5593,38 @@ void MacroAssembler::JumpIfNotSmi(Register value, Label* not_smi_label,
 void MacroAssembler::Assert(Condition cc, AbortReason reason, Register rs,
                             Operand rt) {
   if (v8_flags.debug_code) Check(cc, reason, rs, rt);
+}
+
+void MacroAssembler::AssertJSAny(Register object, Register map_tmp,
+                                 Register tmp, AbortReason abort_reason) {
+  if (!v8_flags.debug_code) return;
+
+  ASM_CODE_COMMENT(this);
+  DCHECK(!AreAliased(object, map_tmp, tmp));
+  Label ok;
+
+  JumpIfSmi(object, &ok);
+
+  GetObjectType(object, map_tmp, tmp);
+
+  Branch(&ok, kUnsignedLessThanEqual, tmp, Operand(LAST_NAME_TYPE));
+
+  Branch(&ok, kUnsignedGreaterThanEqual, tmp, Operand(FIRST_JS_RECEIVER_TYPE));
+
+  Branch(&ok, kEqual, map_tmp, RootIndex::kHeapNumberMap);
+
+  Branch(&ok, kEqual, map_tmp, RootIndex::kBigIntMap);
+
+  Branch(&ok, kEqual, object, RootIndex::kUndefinedValue);
+
+  Branch(&ok, kEqual, object, RootIndex::kTrueValue);
+
+  Branch(&ok, kEqual, object, RootIndex::kFalseValue);
+
+  Branch(&ok, kEqual, object, RootIndex::kNullValue);
+
+  Abort(abort_reason);
+  bind(&ok);
 }
 
 void MacroAssembler::AssertNotSmi(Register object) {
@@ -6185,16 +6210,17 @@ void MacroAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
                                             : Deoptimizer::kEagerDeoptExitSize);
 }
 
-void MacroAssembler::LoadCodeEntry(Register destination,
-                                   Register code_data_container_object) {
+void MacroAssembler::LoadCodeInstructionStart(
+    Register destination, Register code_data_container_object) {
   ASM_CODE_COMMENT(this);
-  Ld(destination,
-     FieldMemOperand(code_data_container_object, Code::kCodeEntryPointOffset));
+  Ld(destination, FieldMemOperand(code_data_container_object,
+                                  Code::kInstructionStartOffset));
 }
 
 void MacroAssembler::CallCodeObject(Register code_data_container_object) {
   ASM_CODE_COMMENT(this);
-  LoadCodeEntry(code_data_container_object, code_data_container_object);
+  LoadCodeInstructionStart(code_data_container_object,
+                           code_data_container_object);
   Call(code_data_container_object);
 }
 
@@ -6202,7 +6228,8 @@ void MacroAssembler::JumpCodeObject(Register code_data_container_object,
                                     JumpMode jump_mode) {
   ASM_CODE_COMMENT(this);
   DCHECK_EQ(JumpMode::kJump, jump_mode);
-  LoadCodeEntry(code_data_container_object, code_data_container_object);
+  LoadCodeInstructionStart(code_data_container_object,
+                           code_data_container_object);
   Jump(code_data_container_object);
 }
 
@@ -6240,7 +6267,7 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
                                          scratch1, scratch2);
 
   static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
-  __ LoadCodeEntry(a2, optimized_code_entry);
+  __ LoadCodeInstructionStart(a2, optimized_code_entry);
   __ Jump(a2);
 
   // Optimized code slot contains deoptimized code or code is cleared and
@@ -6300,7 +6327,7 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
   }
 
   static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
-  LoadCodeEntry(a2, v0);
+  LoadCodeInstructionStart(a2, v0);
   Jump(a2);
 }
 

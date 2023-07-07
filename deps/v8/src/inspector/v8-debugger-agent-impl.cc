@@ -348,7 +348,7 @@ Response buildScopes(v8::Isolate* isolate, v8::debug::ScopeIterator* iterator,
     std::unique_ptr<RemoteObject> object;
     Response result =
         injectedScript->wrapObject(iterator->GetObject(), kBacktraceObjectGroup,
-                                   WrapMode::kNoPreview, &object);
+                                   WrapOptions({WrapMode::kIdOnly}), &object);
     if (!result.IsSuccess()) return result;
 
     auto scope = Scope::create()
@@ -415,9 +415,8 @@ bool hitBreakReasonEncodedAsOther(v8::debug::BreakReasons breakReasons) {
   // The listed break reasons are not explicitly encoded in CDP when
   // reporting the break. They are summarized as 'other'.
   v8::debug::BreakReasons otherBreakReasons(
-      {v8::debug::BreakReason::kStep,
-       v8::debug::BreakReason::kDebuggerStatement,
-       v8::debug::BreakReason::kScheduled, v8::debug::BreakReason::kAsyncStep,
+      {v8::debug::BreakReason::kDebuggerStatement,
+       v8::debug::BreakReason::kScheduled,
        v8::debug::BreakReason::kAlreadyPaused});
   return breakReasons.contains_any(otherBreakReasons);
 }
@@ -1302,18 +1301,28 @@ Response V8DebuggerAgentImpl::disassembleWasmModule(
 #if V8_ENABLE_WEBASSEMBLY
   if (!enabled()) return Response::ServerError(kDebuggerNotEnabled);
   ScriptsMap::iterator it = m_scripts.find(in_scriptId);
-  if (it == m_scripts.end()) {
-    return Response::InvalidParams("No script for id: " + in_scriptId.utf8());
-  }
-  V8DebuggerScript* script = it->second.get();
-  if (script->getLanguage() != V8DebuggerScript::Language::WebAssembly) {
-    return Response::InvalidParams("Script with id " + in_scriptId.utf8() +
-                                   " is not WebAssembly");
-  }
   std::unique_ptr<DisassemblyCollectorImpl> collector =
       std::make_unique<DisassemblyCollectorImpl>();
   std::vector<int> functionBodyOffsets;
-  script->Disassemble(collector.get(), &functionBodyOffsets);
+  if (it != m_scripts.end()) {
+    V8DebuggerScript* script = it->second.get();
+    if (script->getLanguage() != V8DebuggerScript::Language::WebAssembly) {
+      return Response::InvalidParams("Script with id " + in_scriptId.utf8() +
+                                     " is not WebAssembly");
+    }
+    script->Disassemble(collector.get(), &functionBodyOffsets);
+  } else {
+    auto cachedScriptIt =
+        std::find_if(m_cachedScripts.begin(), m_cachedScripts.end(),
+                     [&in_scriptId](const CachedScript& cachedScript) {
+                       return cachedScript.scriptId == in_scriptId;
+                     });
+    if (cachedScriptIt == m_cachedScripts.end()) {
+      return Response::InvalidParams("No script for id: " + in_scriptId.utf8());
+    }
+    v8::debug::Disassemble(v8::base::VectorOf(cachedScriptIt->bytecode),
+                           collector.get(), &functionBodyOffsets);
+  }
   *out_totalNumberOfLines =
       static_cast<int>(collector->total_number_of_lines());
   *out_functionBodyOffsets =
@@ -1337,6 +1346,7 @@ Response V8DebuggerAgentImpl::disassembleWasmModule(
   return Response::ServerError("WebAssembly is disabled");
 #endif  // V8_ENABLE_WEBASSEMBLY
 }
+
 Response V8DebuggerAgentImpl::nextWasmDisassemblyChunk(
     const String16& in_streamId,
     std::unique_ptr<protocol::Debugger::WasmDisassemblyChunk>* out_chunk) {
@@ -1564,12 +1574,15 @@ Response V8DebuggerAgentImpl::evaluateOnCallFrame(
   // context or session.
   response = scope.initialize();
   if (!response.IsSuccess()) return response;
-  WrapMode mode = generatePreview.fromMaybe(false) ? WrapMode::kWithPreview
-                                                   : WrapMode::kNoPreview;
-  if (returnByValue.fromMaybe(false)) mode = WrapMode::kForceValue;
+  WrapOptions wrapOptions = generatePreview.fromMaybe(false)
+                                ? WrapOptions({WrapMode::kPreview})
+                                : WrapOptions({WrapMode::kIdOnly});
+  if (returnByValue.fromMaybe(false))
+    wrapOptions = WrapOptions({WrapMode::kJson});
   return scope.injectedScript()->wrapEvaluateResult(
-      maybeResultValue, scope.tryCatch(), objectGroup.fromMaybe(""), mode,
-      throwOnSideEffect.fromMaybe(false), result, exceptionDetails);
+      maybeResultValue, scope.tryCatch(), objectGroup.fromMaybe(""),
+      wrapOptions, throwOnSideEffect.fromMaybe(false), result,
+      exceptionDetails);
 }
 
 Response V8DebuggerAgentImpl::setVariableValue(
@@ -1743,9 +1756,9 @@ Response V8DebuggerAgentImpl::currentCallFrames(
     if (injectedScript) {
       v8::Local<v8::Value> receiver;
       if (iterator->GetReceiver().ToLocal(&receiver)) {
-        res =
-            injectedScript->wrapObject(receiver, kBacktraceObjectGroup,
-                                       WrapMode::kNoPreview, &protocolReceiver);
+        res = injectedScript->wrapObject(receiver, kBacktraceObjectGroup,
+                                         WrapOptions({WrapMode::kIdOnly}),
+                                         &protocolReceiver);
         if (!res.IsSuccess()) return res;
       }
     }
@@ -1788,8 +1801,9 @@ Response V8DebuggerAgentImpl::currentCallFrames(
     v8::Local<v8::Value> returnValue = iterator->GetReturnValue();
     if (!returnValue.IsEmpty() && injectedScript) {
       std::unique_ptr<RemoteObject> value;
-      res = injectedScript->wrapObject(returnValue, kBacktraceObjectGroup,
-                                       WrapMode::kNoPreview, &value);
+      res =
+          injectedScript->wrapObject(returnValue, kBacktraceObjectGroup,
+                                     WrapOptions({WrapMode::kIdOnly}), &value);
       if (!res.IsSuccess()) return res;
       frame->setReturnValue(std::move(value));
     }
@@ -2094,7 +2108,7 @@ void V8DebuggerAgentImpl::didPause(
               : protocol::Debugger::Paused::ReasonEnum::Exception;
       std::unique_ptr<protocol::Runtime::RemoteObject> obj;
       injectedScript->wrapObject(exception, kBacktraceObjectGroup,
-                                 WrapMode::kNoPreview, &obj);
+                                 WrapOptions({WrapMode::kIdOnly}), &obj);
       std::unique_ptr<protocol::DictionaryValue> breakAuxData;
       if (obj) {
         std::vector<uint8_t> serialized;
@@ -2106,6 +2120,12 @@ void V8DebuggerAgentImpl::didPause(
       hitReasons.push_back(
           std::make_pair(breakReason, std::move(breakAuxData)));
     }
+  }
+
+  if (breakReasons.contains(v8::debug::BreakReason::kStep) ||
+      breakReasons.contains(v8::debug::BreakReason::kAsyncStep)) {
+    hitReasons.push_back(
+        std::make_pair(protocol::Debugger::Paused::ReasonEnum::Step, nullptr));
   }
 
   auto hitBreakpointIds = std::make_unique<Array<String16>>();

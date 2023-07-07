@@ -2364,6 +2364,8 @@ SIMD_SHIFT_RI_LIST(EMIT_SIMD_SHIFT_RI)
   V(f64x2_floor, F64x2Floor, fp, fp, true, bool)                       \
   V(f64x2_trunc, F64x2Trunc, fp, fp, true, bool)                       \
   V(f64x2_nearest_int, F64x2NearestInt, fp, fp, true, bool)            \
+  V(f64x2_convert_low_i32x4_s, F64x2ConvertLowI32x4S, fp, fp, , void)  \
+  V(f64x2_convert_low_i32x4_u, F64x2ConvertLowI32x4U, fp, fp, , void)  \
   V(f32x4_abs, F32x4Abs, fp, fp, , void)                               \
   V(f32x4_splat, F32x4Splat, fp, fp, , void)                           \
   V(f32x4_neg, F32x4Neg, fp, fp, , void)                               \
@@ -2396,6 +2398,7 @@ SIMD_SHIFT_RI_LIST(EMIT_SIMD_SHIFT_RI)
   V(i8x16_abs, I8x16Abs, fp, fp, , void)                               \
   V(i8x16_neg, I8x16Neg, fp, fp, , void)                               \
   V(i8x16_splat, I8x16Splat, fp, gp, , void)                           \
+  V(i8x16_popcnt, I8x16Popcnt, fp, fp, , void)                         \
   V(s128_not, S128Not, fp, fp, , void)
 
 #define EMIT_SIMD_UNOP(name, op, dtype, stype, return_val, return_type) \
@@ -2720,19 +2723,7 @@ void LiftoffAssembler::emit_i8x16_swizzle(LiftoffRegister dst,
   Simd128Register src1 = lhs.fp();
   Simd128Register src2 = rhs.fp();
   Simd128Register dest = dst.fp();
-  Simd128Register temp =
-      GetUnusedRegister(kFpReg, LiftoffRegList{dest, src1, src2}).fp();
-  I8x16Swizzle(dest, src1, src2, r0, r1, kScratchDoubleReg, temp);
-}
-
-void LiftoffAssembler::emit_f64x2_convert_low_i32x4_s(LiftoffRegister dst,
-                                                      LiftoffRegister src) {
-  F64x2ConvertLowI32x4S(dst.fp(), src.fp());
-}
-
-void LiftoffAssembler::emit_f64x2_convert_low_i32x4_u(LiftoffRegister dst,
-                                                      LiftoffRegister src) {
-  F64x2ConvertLowI32x4U(dst.fp(), src.fp());
+  I8x16Swizzle(dest, src1, src2, r0, r1, kScratchDoubleReg);
 }
 
 void LiftoffAssembler::emit_f64x2_promote_low_f32x4(LiftoffRegister dst,
@@ -2817,11 +2808,6 @@ void LiftoffAssembler::emit_i8x16_shuffle(LiftoffRegister dst,
 #endif
   I8x16Shuffle(dst.fp(), lhs.fp(), rhs.fp(), vals[1], vals[0], r0, ip,
                kScratchDoubleReg);
-}
-
-void LiftoffAssembler::emit_i8x16_popcnt(LiftoffRegister dst,
-                                         LiftoffRegister src) {
-  I8x16Popcnt(dst.fp(), src.fp());
 }
 
 void LiftoffAssembler::emit_v128_anytrue(LiftoffRegister dst,
@@ -2947,13 +2933,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
 void LiftoffAssembler::RecordSpillsInSafepoint(
     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
     LiftoffRegList ref_spills, int spill_offset) {
-  int spill_space_size = 0;
-  while (!all_spills.is_empty()) {
-    LiftoffRegister reg = all_spills.GetLastRegSet();
+  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
+  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
+  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
+  while (!gp_spills.is_empty()) {
+    LiftoffRegister reg = gp_spills.GetLastRegSet();
     if (ref_spills.has(reg)) {
       safepoint.DefineTaggedStackSlot(spill_offset);
     }
-    all_spills.clear(reg);
+    gp_spills.clear(reg);
     ++spill_offset;
     spill_space_size += kSystemPointerSize;
   }
@@ -2966,8 +2954,7 @@ void LiftoffAssembler::DropStackSlotsAndRet(uint32_t num_stack_slots) {
   Ret();
 }
 
-void LiftoffAssembler::CallC(const ValueKindSig* sig,
-                             const LiftoffRegister* args,
+void LiftoffAssembler::CallC(const ValueKindSig* sig, const VarState* args,
                              const LiftoffRegister* rets,
                              ValueKind out_argument_kind, int stack_bytes,
                              ExternalReference ext_ref) {
@@ -2985,32 +2972,48 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
 
   lay(sp, MemOperand(sp, -size));
 
-  int arg_bytes = 0;
+  int arg_offset = 0;
+  const VarState* current_arg = args;
   for (ValueKind param_kind : sig->parameters()) {
-    switch (param_kind) {
-      case kI32:
-        StoreU32(args->gp(), MemOperand(sp, arg_bytes));
-        break;
-      case kI64:
-        StoreU64(args->gp(), MemOperand(sp, arg_bytes));
-        break;
-      case kF32:
-        StoreF32(args->fp(), MemOperand(sp, arg_bytes));
-        break;
-      case kF64:
-        StoreF64(args->fp(), MemOperand(sp, arg_bytes));
-        break;
-      case kS128:
-        StoreV128(args->fp(), MemOperand(sp, arg_bytes), r0);
-        break;
-      default:
-        UNREACHABLE();
+    MemOperand dst{sp, arg_offset};
+    if (current_arg->is_reg()) {
+      switch (param_kind) {
+        case kI32:
+          StoreU32(current_arg->reg().gp(), MemOperand(sp, arg_offset));
+          break;
+        case kI64:
+          StoreU64(current_arg->reg().gp(), MemOperand(sp, arg_offset));
+          break;
+        case kF32:
+          StoreF32(current_arg->reg().fp(), MemOperand(sp, arg_offset));
+          break;
+        case kF64:
+          StoreF64(current_arg->reg().fp(), MemOperand(sp, arg_offset));
+          break;
+        case kS128:
+          StoreV128(current_arg->reg().fp(), MemOperand(sp, arg_offset), r0);
+          break;
+        default:
+          UNREACHABLE();
+      }
+    } else if (current_arg->is_const()) {
+      DCHECK_EQ(kI32, param_kind);
+      mov(r0, Operand(current_arg->i32_const()));
+      StoreU32(r0, dst);
+    } else if (value_kind_size(current_arg->kind()) == 4) {
+      MemOperand src = liftoff::GetStackSlot(current_arg->offset());
+      LoadU32(r0, src);
+      StoreU32(r0, dst);
+    } else {
+      DCHECK_EQ(8, value_kind_size(current_arg->kind()));
+      MemOperand src = liftoff::GetStackSlot(current_arg->offset());
+      LoadU64(r0, src);
+      StoreU64(r0, dst);
     }
-    args++;
-    arg_bytes += value_kind_size(param_kind);
+    arg_offset += value_kind_size(param_kind);
+    ++current_arg;
   }
-
-  DCHECK_LE(arg_bytes, stack_bytes);
+  DCHECK_LE(arg_offset, stack_bytes);
 
   // Pass a pointer to the buffer with the arguments to the C function.
   mov(r2, sp);

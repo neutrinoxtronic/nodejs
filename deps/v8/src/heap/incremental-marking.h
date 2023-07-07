@@ -7,6 +7,7 @@
 
 #include "src/base/logging.h"
 #include "src/base/platform/mutex.h"
+#include "src/base/platform/time.h"
 #include "src/common/globals.h"
 #include "src/heap/heap.h"
 #include "src/heap/incremental-marking-job.h"
@@ -36,7 +37,7 @@ enum class StepOrigin {
   kTask
 };
 
-enum class CurrentCollector { kNone, kMinorMC, kMajorMC };
+enum class CurrentCollector { kNone, kMinorMS, kMajorMC };
 
 class V8_EXPORT_PRIVATE IncrementalMarking final {
  public:
@@ -71,8 +72,10 @@ class V8_EXPORT_PRIVATE IncrementalMarking final {
   static const size_t kOldGenerationAllocatedThreshold = 256 * KB;
   static const size_t kMinStepSizeInBytes = 64 * KB;
 
-  static constexpr double kStepSizeInMs = 1;
-  static constexpr double kMaxStepSizeInMs = 5;
+  static constexpr v8::base::TimeDelta kMaxStepSizeOnTask =
+      v8::base::TimeDelta::FromMilliseconds(1);
+  static constexpr v8::base::TimeDelta kMaxStepSizeOnAllocation =
+      v8::base::TimeDelta::FromMilliseconds(5);
 
 #ifndef DEBUG
   static constexpr size_t kV8ActivationThreshold = 8 * MB;
@@ -105,7 +108,7 @@ class V8_EXPORT_PRIVATE IncrementalMarking final {
   // Returns true if incremental marking was running and false otherwise.
   bool Stop();
 
-  void UpdateMarkingWorklistAfterYoungGenGC();
+  void UpdateMarkingWorklistAfterScavenge();
   void UpdateMarkedBytesAfterScavenge(size_t dead_bytes_in_new_space);
 
   // Performs incremental marking step and finalizes marking if complete.
@@ -144,21 +147,20 @@ class V8_EXPORT_PRIVATE IncrementalMarking final {
     background_live_bytes_[chunk] += by;
   }
 
-  void MarkRootsForTesting();
-
-  // Performs incremental marking step for unit tests.
-  void AdvanceForTesting(double max_step_size_in_ms);
-
   bool IsMinorMarking() const {
-    return IsMarking() && current_collector_ == CurrentCollector::kMinorMC;
+    return IsMarking() && current_collector_ == CurrentCollector::kMinorMS;
   }
   bool IsMajorMarking() const {
     return IsMarking() && current_collector_ == CurrentCollector::kMajorMC;
   }
 
+  void MarkRootsForTesting();
+
+  // Performs incremental marking step for unit tests.
+  void AdvanceForTesting(v8::base::TimeDelta max_duration);
+
  private:
   MarkingState* marking_state() { return marking_state_; }
-  AtomicMarkingState* atomic_marking_state() { return atomic_marking_state_; }
 
   class IncrementalMarkingRootMarkingVisitor;
 
@@ -196,11 +198,6 @@ class V8_EXPORT_PRIVATE IncrementalMarking final {
   size_t StepSizeToMakeProgress();
   void AddScheduledBytesToMark(size_t bytes_to_mark);
 
-  // Schedules more bytes to mark so that the marker is no longer ahead
-  // of schedule.
-  void FastForwardSchedule();
-  void FastForwardScheduleIfCloseToFinalization();
-
   // Fetches marked byte counters from the concurrent marker.
   void FetchBytesMarkedConcurrently();
 
@@ -218,7 +215,7 @@ class V8_EXPORT_PRIVATE IncrementalMarking final {
   // marking schedule, which is indicated with StepResult::kDone.
   void AdvanceWithDeadline(StepOrigin step_origin);
 
-  void Step(double max_step_size_in_ms, StepOrigin step_origin);
+  void Step(v8::base::TimeDelta max_duration, StepOrigin step_origin);
 
   // Returns true if the function succeeds in transitioning the object
   // from white to grey.
@@ -231,7 +228,7 @@ class V8_EXPORT_PRIVATE IncrementalMarking final {
   CurrentCollector current_collector_{CurrentCollector::kNone};
 
   MarkCompactCollector* const major_collector_;
-  MinorMarkCompactCollector* const minor_collector_;
+  MinorMarkSweepCollector* const minor_collector_;
 
   WeakObjects* weak_objects_;
 
@@ -262,7 +259,6 @@ class V8_EXPORT_PRIVATE IncrementalMarking final {
   Observer old_generation_observer_;
 
   MarkingState* const marking_state_;
-  AtomicMarkingState* const atomic_marking_state_;
 
   base::Mutex background_live_bytes_mutex_;
   std::unordered_map<MemoryChunk*, intptr_t> background_live_bytes_;

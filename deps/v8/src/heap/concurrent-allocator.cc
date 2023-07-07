@@ -89,13 +89,11 @@ ConcurrentAllocator::ConcurrentAllocator(LocalHeap* local_heap,
 }
 
 void ConcurrentAllocator::FreeLinearAllocationArea() {
-  // The code page of the linear allocation area needs to be unprotected
-  // because we are going to write a filler into that memory area below.
-  base::Optional<CodePageMemoryModificationScope> optional_scope;
-  if (IsLabValid() && space_->identity() == CODE_SPACE) {
-    optional_scope.emplace(MemoryChunk::FromAddress(lab_.top()));
-  }
   if (lab_.top() != lab_.limit() && IsBlackAllocationEnabled()) {
+    base::Optional<CodePageHeaderModificationScope> optional_scope;
+    if (space_->identity() == CODE_SPACE) {
+      optional_scope.emplace("Clears marking bitmap in the page header.");
+    }
     Page::FromAddress(lab_.top())
         ->DestroyBlackAreaBackground(lab_.top(), lab_.limit());
   }
@@ -105,12 +103,6 @@ void ConcurrentAllocator::FreeLinearAllocationArea() {
 }
 
 void ConcurrentAllocator::MakeLinearAllocationAreaIterable() {
-  // The code page of the linear allocation area needs to be unprotected
-  // because we are going to write a filler into that memory area below.
-  base::Optional<CodePageMemoryModificationScope> optional_scope;
-  if (IsLabValid() && space_->identity() == CODE_SPACE) {
-    optional_scope.emplace(MemoryChunk::FromAddress(lab_.top()));
-  }
   MakeLabIterable();
 }
 
@@ -210,24 +202,26 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
         min_size_in_bytes, max_size_in_bytes, origin);
     if (result) return result;
 
-    // Now contribute to sweeping from background thread and then try to
-    // reallocate.
-    int max_freed;
-    {
-      TRACE_GC_EPOCH(owning_heap()->tracer(),
-                     GCTracer::Scope::MC_BACKGROUND_SWEEPING,
-                     ThreadKind::kBackground);
-      const int kMaxPagesToSweep = 1;
-      max_freed = owning_heap()->sweeper()->ParallelSweepSpace(
-          space_->identity(), Sweeper::SweepingMode::kLazyOrConcurrent,
-          static_cast<int>(min_size_in_bytes), kMaxPagesToSweep);
-      space_->RefillFreeList();
-    }
+    if (owning_heap()->major_sweeping_in_progress()) {
+      // Now contribute to sweeping from background thread and then try to
+      // reallocate.
+      int max_freed;
+      {
+        TRACE_GC_EPOCH(owning_heap()->tracer(),
+                       GCTracer::Scope::MC_BACKGROUND_SWEEPING,
+                       ThreadKind::kBackground);
+        const int kMaxPagesToSweep = 1;
+        max_freed = owning_heap()->sweeper()->ParallelSweepSpace(
+            space_->identity(), Sweeper::SweepingMode::kLazyOrConcurrent,
+            static_cast<int>(min_size_in_bytes), kMaxPagesToSweep);
+        space_->RefillFreeList();
+      }
 
-    if (static_cast<size_t>(max_freed) >= min_size_in_bytes) {
-      result = space_->TryAllocationFromFreeListBackground(
-          min_size_in_bytes, max_size_in_bytes, origin);
-      if (result) return result;
+      if (static_cast<size_t>(max_freed) >= min_size_in_bytes) {
+        result = space_->TryAllocationFromFreeListBackground(
+            min_size_in_bytes, max_size_in_bytes, origin);
+        if (result) return result;
+      }
     }
   }
 
@@ -239,7 +233,7 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
     if (result) return result;
   }
 
-  if (owning_heap()->sweeping_in_progress()) {
+  if (owning_heap()->major_sweeping_in_progress()) {
     // Complete sweeping for this space.
     TRACE_GC_EPOCH(owning_heap()->tracer(),
                    GCTracer::Scope::MC_BACKGROUND_SWEEPING,
@@ -272,7 +266,7 @@ AllocationResult ConcurrentAllocator::AllocateOutsideLab(
 
   HeapObject object = HeapObject::FromAddress(result->first);
   if (requested_filler_size > 0) {
-    object = owning_heap()->AlignWithFiller(
+    object = owning_heap()->AlignWithFillerBackground(
         object, size_in_bytes, static_cast<int>(result->second), alignment);
   }
 

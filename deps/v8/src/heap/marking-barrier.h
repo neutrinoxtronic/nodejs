@@ -66,7 +66,8 @@ class MarkingBarrier {
 
   inline bool WhiteToGreyAndPush(HeapObject value);
 
-  void RecordRelocSlot(RelocInfo* rinfo, HeapObject target);
+  void RecordRelocSlot(InstructionStream host, RelocInfo* rinfo,
+                       HeapObject target);
 
   bool IsCurrentMarkingBarrier(HeapObject verification_candidate);
 
@@ -83,7 +84,7 @@ class MarkingBarrier {
 
   Heap* heap_;
   MarkCompactCollector* major_collector_;
-  MinorMarkCompactCollector* minor_collector_;
+  MinorMarkSweepCollector* minor_collector_;
   IncrementalMarking* incremental_marking_;
   MarkingWorklist::Local major_worklist_;
   MarkingWorklist::Local minor_worklist_;

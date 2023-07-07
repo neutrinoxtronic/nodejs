@@ -53,10 +53,6 @@ class BaselineCompilerTask {
     compiler.GenerateCode();
     maybe_code_ = local_isolate->heap()->NewPersistentMaybeHandle(
         compiler.Build(local_isolate));
-    Handle<Code> code;
-    if (maybe_code_.ToHandle(&code)) {
-      local_isolate->heap()->RegisterCodeObject(code);
-    }
     time_taken_ms_ = timer.Elapsed().InMillisecondsF();
   }
 
@@ -75,6 +71,7 @@ class BaselineCompilerTask {
     }
 
     shared_function_info_->set_baseline_code(*code, kReleaseStore);
+    shared_function_info_->set_age(0);
     if (v8_flags.trace_baseline_concurrent_compilation) {
       CodeTracer::Scope scope(isolate->GetCodeTracer());
       std::stringstream ss;
@@ -163,14 +160,9 @@ class ConcurrentBaselineCompiler {
           outgoing_queue_(outcoming_queue) {}
 
     void Run(JobDelegate* delegate) override {
-      RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
       LocalIsolate local_isolate(isolate_, ThreadKind::kBackground);
       UnparkedScope unparked_scope(&local_isolate);
       LocalHandleScope handle_scope(&local_isolate);
-
-      // Since we're going to compile an entire batch, this guarantees that
-      // we only switch back the memory chunks to RX at the end.
-      CodePageCollectionMemoryModificationScope batch_alloc(isolate_->heap());
 
       while (!incoming_queue_->IsEmpty() && !delegate->ShouldYield()) {
         std::unique_ptr<BaselineBatchCompilerJob> job;
@@ -184,10 +176,11 @@ class ConcurrentBaselineCompiler {
 
     size_t GetMaxConcurrency(size_t worker_count) const override {
       size_t max_threads = v8_flags.concurrent_sparkplug_max_threads;
+      size_t num_tasks = incoming_queue_->size() + worker_count;
       if (max_threads > 0) {
-        return std::min(max_threads, incoming_queue_->size());
+        return std::min(max_threads, num_tasks);
       }
-      return incoming_queue_->size();
+      return num_tasks;
     }
 
    private:
@@ -315,7 +308,6 @@ void BaselineBatchCompiler::EnsureQueueCapacity() {
 }
 
 void BaselineBatchCompiler::CompileBatch(Handle<JSFunction> function) {
-  CodePageCollectionMemoryModificationScope batch_allocation(isolate_->heap());
   {
     IsCompiledScope is_compiled_scope(
         function->shared().is_compiled_scope(isolate_));

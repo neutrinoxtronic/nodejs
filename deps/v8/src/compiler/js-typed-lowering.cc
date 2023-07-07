@@ -479,7 +479,7 @@ JSTypedLowering::JSTypedLowering(Editor* editor, JSGraph* jsgraph,
       empty_string_type_(
           Type::Constant(broker, broker->empty_string(), graph()->zone())),
       pointer_comparable_type_(
-          Type::Union(Type::Oddball(),
+          Type::Union(Type::BooleanOrNullOrUndefined(),
                       Type::Union(Type::SymbolOrReceiver(), empty_string_type_,
                                   graph()->zone()),
                       graph()->zone())),
@@ -1782,7 +1782,7 @@ Reduction JSTypedLowering::ReduceJSCall(Node* node) {
     // If this state changes during background compilation, the compilation
     // job will be aborted from the main thread (see
     // Debug::PrepareFunctionForDebugExecution()).
-    if (shared->HasBreakInfo()) return NoChange();
+    if (shared->HasBreakInfo(broker())) return NoChange();
 
     // Class constructors are callable, but [[Call]] will raise an exception.
     // See ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList ).
@@ -2031,7 +2031,7 @@ Reduction JSTypedLowering::ReduceJSForInPrepare(Node* node) {
       // Check that the {enumerator} is a Map.
       effect = graph()->NewNode(
           simplified()->CheckMaps(CheckMapsFlag::kNone,
-                                  ZoneHandleSet<Map>(factory()->meta_map())),
+                                  ZoneRefSet<Map>(broker()->meta_map())),
           enumerator, effect, control);
 
       // Load the enum cache from the {enumerator} map.
@@ -2058,7 +2058,7 @@ Reduction JSTypedLowering::ReduceJSForInPrepare(Node* node) {
     case ForInMode::kGeneric: {
       // Check if the {enumerator} is a Map or a FixedArray.
       Node* check = effect = graph()->NewNode(
-          simplified()->CompareMaps(ZoneHandleSet<Map>(factory()->meta_map())),
+          simplified()->CompareMaps(ZoneRefSet<Map>(broker()->meta_map())),
           enumerator, effect, control);
       Node* branch =
           graph()->NewNode(common()->Branch(BranchHint::kTrue), check, control);

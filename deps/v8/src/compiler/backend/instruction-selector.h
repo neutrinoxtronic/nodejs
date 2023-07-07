@@ -8,13 +8,19 @@
 #include <map>
 
 #include "src/codegen/cpu-features.h"
+#include "src/codegen/machine-type.h"
 #include "src/compiler/backend/instruction-scheduler.h"
+#include "src/compiler/backend/instruction-selector-adapter.h"
 #include "src/compiler/backend/instruction.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/feedback-source.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/machine-operator.h"
+#include "src/compiler/node-matchers.h"
 #include "src/compiler/node.h"
+#include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/representations.h"
+#include "src/compiler/turboshaft/utils.h"
 #include "src/utils/bit-vector.h"
 #include "src/zone/zone-containers.h"
 
@@ -31,60 +37,154 @@ namespace compiler {
 
 // Forward declarations.
 class BasicBlock;
-struct CallBuffer;  // TODO(bmeurer): Remove this.
+template <typename Adapter>
+struct CallBufferT;  // TODO(bmeurer): Remove this.
+template <typename Adapter>
+class InstructionSelectorT;
 class Linkage;
-class OperandGenerator;
+template <typename Adapter>
+class OperandGeneratorT;
 class SwitchInfo;
 class StateObjectDeduplicator;
+
+class V8_EXPORT_PRIVATE InstructionSelector final {
+ public:
+  enum SourcePositionMode { kCallSourcePositions, kAllSourcePositions };
+  enum EnableScheduling { kDisableScheduling, kEnableScheduling };
+  enum EnableRootsRelativeAddressing {
+    kDisableRootsRelativeAddressing,
+    kEnableRootsRelativeAddressing
+  };
+  enum EnableSwitchJumpTable {
+    kDisableSwitchJumpTable,
+    kEnableSwitchJumpTable
+  };
+  enum EnableTraceTurboJson { kDisableTraceTurboJson, kEnableTraceTurboJson };
+
+  class Features final {
+   public:
+    Features() : bits_(0) {}
+    explicit Features(unsigned bits) : bits_(bits) {}
+    explicit Features(CpuFeature f) : bits_(1u << f) {}
+    Features(CpuFeature f1, CpuFeature f2) : bits_((1u << f1) | (1u << f2)) {}
+
+    bool Contains(CpuFeature f) const { return (bits_ & (1u << f)); }
+
+   private:
+    unsigned bits_;
+  };
+
+  static InstructionSelector ForTurbofan(
+      Zone* zone, size_t node_count, Linkage* linkage,
+      InstructionSequence* sequence, Schedule* schedule,
+      SourcePositionTable* source_positions, Frame* frame,
+      EnableSwitchJumpTable enable_switch_jump_table, TickCounter* tick_counter,
+      JSHeapBroker* broker, size_t* max_unoptimized_frame_height,
+      size_t* max_pushed_argument_count,
+      SourcePositionMode source_position_mode = kCallSourcePositions,
+      Features features = SupportedFeatures(),
+      EnableScheduling enable_scheduling = v8_flags.turbo_instruction_scheduling
+                                               ? kEnableScheduling
+                                               : kDisableScheduling,
+      EnableRootsRelativeAddressing enable_roots_relative_addressing =
+          kDisableRootsRelativeAddressing,
+      EnableTraceTurboJson trace_turbo = kDisableTraceTurboJson);
+
+  static InstructionSelector ForTurboshaft(
+      Zone* zone, size_t node_count, Linkage* linkage,
+      InstructionSequence* sequence, turboshaft::Graph* schedule,
+      SourcePositionTable* source_positions, Frame* frame,
+      EnableSwitchJumpTable enable_switch_jump_table, TickCounter* tick_counter,
+      JSHeapBroker* broker, size_t* max_unoptimized_frame_height,
+      size_t* max_pushed_argument_count,
+      SourcePositionMode source_position_mode = kCallSourcePositions,
+      Features features = SupportedFeatures(),
+      EnableScheduling enable_scheduling = v8_flags.turbo_instruction_scheduling
+                                               ? kEnableScheduling
+                                               : kDisableScheduling,
+      EnableRootsRelativeAddressing enable_roots_relative_addressing =
+          kDisableRootsRelativeAddressing,
+      EnableTraceTurboJson trace_turbo = kDisableTraceTurboJson);
+
+  ~InstructionSelector();
+
+  base::Optional<BailoutReason> SelectInstructions();
+
+  bool IsSupported(CpuFeature feature) const;
+
+  // Returns the features supported on the target platform.
+  static Features SupportedFeatures() {
+    return Features(CpuFeatures::SupportedFeatures());
+  }
+
+  const ZoneVector<std::pair<int, int>>& instr_origins() const;
+  const std::map<NodeId, int> GetVirtualRegistersForTesting() const;
+
+  static MachineOperatorBuilder::Flags SupportedMachineOperatorFlags();
+  static MachineOperatorBuilder::AlignmentRequirements AlignmentRequirements();
+
+ private:
+  InstructionSelector(InstructionSelectorT<TurbofanAdapter>* turbofan_impl,
+                      InstructionSelectorT<TurboshaftAdapter>* turboshaft_impl);
+  InstructionSelector(const InstructionSelector&) = delete;
+  InstructionSelector& operator=(const InstructionSelector&) = delete;
+
+  InstructionSelectorT<TurbofanAdapter>* turbofan_impl_;
+  InstructionSelectorT<TurboshaftAdapter>* turboshaft_impl_;
+};
 
 // The flags continuation is a way to combine a branch or a materialization
 // of a boolean value with an instruction that sets the flags register.
 // The whole instruction is treated as a unit by the register allocator, and
 // thus no spills or moves can be introduced between the flags-setting
 // instruction and the branch or set it should be combined with.
-class FlagsContinuation final {
+template <typename Adapter>
+class FlagsContinuationT final {
  public:
-  FlagsContinuation() : mode_(kFlags_none) {}
+  using block_t = typename Adapter::block_t;
+  using node_t = typename Adapter::node_t;
+  using id_t = typename Adapter::id_t;
+
+  FlagsContinuationT() : mode_(kFlags_none) {}
 
   // Creates a new flags continuation from the given condition and true/false
   // blocks.
-  static FlagsContinuation ForBranch(FlagsCondition condition,
-                                     BasicBlock* true_block,
-                                     BasicBlock* false_block) {
-    return FlagsContinuation(kFlags_branch, condition, true_block, false_block);
+  static FlagsContinuationT ForBranch(FlagsCondition condition,
+                                      block_t true_block, block_t false_block) {
+    return FlagsContinuationT(kFlags_branch, condition, true_block,
+                              false_block);
   }
 
   // Creates a new flags continuation for an eager deoptimization exit.
-  static FlagsContinuation ForDeoptimize(FlagsCondition condition,
-                                         DeoptimizeReason reason,
-                                         NodeId node_id,
-                                         FeedbackSource const& feedback,
-                                         FrameState frame_state) {
-    return FlagsContinuation(kFlags_deoptimize, condition, reason, node_id,
-                             feedback, frame_state);
+  static FlagsContinuationT ForDeoptimize(FlagsCondition condition,
+                                          DeoptimizeReason reason, id_t node_id,
+                                          FeedbackSource const& feedback,
+                                          node_t frame_state) {
+    return FlagsContinuationT(kFlags_deoptimize, condition, reason, node_id,
+                              feedback, frame_state);
   }
-  static FlagsContinuation ForDeoptimizeForTesting(
-      FlagsCondition condition, DeoptimizeReason reason, NodeId node_id,
-      FeedbackSource const& feedback, Node* frame_state) {
+  static FlagsContinuationT ForDeoptimizeForTesting(
+      FlagsCondition condition, DeoptimizeReason reason, id_t node_id,
+      FeedbackSource const& feedback, node_t frame_state) {
     // test-instruction-scheduler.cc passes a dummy Node* as frame_state.
     // Contents don't matter as long as it's not nullptr.
-    return FlagsContinuation(kFlags_deoptimize, condition, reason, node_id,
-                             feedback, frame_state);
+    return FlagsContinuationT(kFlags_deoptimize, condition, reason, node_id,
+                              feedback, frame_state);
   }
 
   // Creates a new flags continuation for a boolean value.
-  static FlagsContinuation ForSet(FlagsCondition condition, Node* result) {
-    return FlagsContinuation(condition, result);
+  static FlagsContinuationT ForSet(FlagsCondition condition, node_t result) {
+    return FlagsContinuationT(condition, result);
   }
 
   // Creates a new flags continuation for a wasm trap.
-  static FlagsContinuation ForTrap(FlagsCondition condition, TrapId trap_id) {
-    return FlagsContinuation(condition, trap_id);
+  static FlagsContinuationT ForTrap(FlagsCondition condition, TrapId trap_id) {
+    return FlagsContinuationT(condition, trap_id);
   }
 
-  static FlagsContinuation ForSelect(FlagsCondition condition, Node* result,
-                                     Node* true_value, Node* false_value) {
-    return FlagsContinuation(condition, result, true_value, false_value);
+  static FlagsContinuationT ForSelect(FlagsCondition condition, node_t result,
+                                      node_t true_value, node_t false_value) {
+    return FlagsContinuationT(condition, result, true_value, false_value);
   }
 
   bool IsNone() const { return mode_ == kFlags_none; }
@@ -101,7 +201,7 @@ class FlagsContinuation final {
     DCHECK(IsDeoptimize());
     return reason_;
   }
-  NodeId node_id() const {
+  id_t node_id() const {
     DCHECK(IsDeoptimize());
     return node_id_;
   }
@@ -109,11 +209,11 @@ class FlagsContinuation final {
     DCHECK(IsDeoptimize());
     return feedback_;
   }
-  Node* frame_state() const {
+  node_t frame_state() const {
     DCHECK(IsDeoptimize());
     return frame_state_or_result_;
   }
-  Node* result() const {
+  node_t result() const {
     DCHECK(IsSet() || IsSelect());
     return frame_state_or_result_;
   }
@@ -121,19 +221,19 @@ class FlagsContinuation final {
     DCHECK(IsTrap());
     return trap_id_;
   }
-  BasicBlock* true_block() const {
+  block_t true_block() const {
     DCHECK(IsBranch());
     return true_block_;
   }
-  BasicBlock* false_block() const {
+  block_t false_block() const {
     DCHECK(IsBranch());
     return false_block_;
   }
-  Node* true_value() const {
+  node_t true_value() const {
     DCHECK(IsSelect());
     return true_value_;
   }
-  Node* false_value() const {
+  node_t false_value() const {
     DCHECK(IsSelect());
     return false_value_;
   }
@@ -186,8 +286,8 @@ class FlagsContinuation final {
   }
 
  private:
-  FlagsContinuation(FlagsMode mode, FlagsCondition condition,
-                    BasicBlock* true_block, BasicBlock* false_block)
+  FlagsContinuationT(FlagsMode mode, FlagsCondition condition,
+                     block_t true_block, block_t false_block)
       : mode_(mode),
         condition_(condition),
         true_block_(true_block),
@@ -197,9 +297,9 @@ class FlagsContinuation final {
     DCHECK_NOT_NULL(false_block);
   }
 
-  FlagsContinuation(FlagsMode mode, FlagsCondition condition,
-                    DeoptimizeReason reason, NodeId node_id,
-                    FeedbackSource const& feedback, Node* frame_state)
+  FlagsContinuationT(FlagsMode mode, FlagsCondition condition,
+                     DeoptimizeReason reason, id_t node_id,
+                     FeedbackSource const& feedback, node_t frame_state)
       : mode_(mode),
         condition_(condition),
         reason_(reason),
@@ -207,91 +307,96 @@ class FlagsContinuation final {
         feedback_(feedback),
         frame_state_or_result_(frame_state) {
     DCHECK(mode == kFlags_deoptimize);
-    DCHECK_NOT_NULL(frame_state);
+    DCHECK(Adapter::valid(frame_state));
   }
 
-  FlagsContinuation(FlagsCondition condition, Node* result)
+  FlagsContinuationT(FlagsCondition condition, node_t result)
       : mode_(kFlags_set),
         condition_(condition),
         frame_state_or_result_(result) {
-    DCHECK_NOT_NULL(result);
+    DCHECK(Adapter::valid(result));
   }
 
-  FlagsContinuation(FlagsCondition condition, TrapId trap_id)
+  FlagsContinuationT(FlagsCondition condition, TrapId trap_id)
       : mode_(kFlags_trap), condition_(condition), trap_id_(trap_id) {}
 
-  FlagsContinuation(FlagsCondition condition, Node* result, Node* true_value,
-                    Node* false_value)
+  FlagsContinuationT(FlagsCondition condition, node_t result, node_t true_value,
+                     node_t false_value)
       : mode_(kFlags_select),
         condition_(condition),
         frame_state_or_result_(result),
         true_value_(true_value),
         false_value_(false_value) {
-    DCHECK_NOT_NULL(result);
-    DCHECK_NOT_NULL(true_value);
-    DCHECK_NOT_NULL(false_value);
+    DCHECK(Adapter::valid(result));
+    DCHECK(Adapter::valid(true_value));
+    DCHECK(Adapter::valid(false_value));
   }
 
   FlagsMode const mode_;
   FlagsCondition condition_;
   DeoptimizeReason reason_;         // Only valid if mode_ == kFlags_deoptimize*
-  NodeId node_id_;                  // Only valid if mode_ == kFlags_deoptimize*
+  id_t node_id_;                    // Only valid if mode_ == kFlags_deoptimize*
   FeedbackSource feedback_;         // Only valid if mode_ == kFlags_deoptimize*
-  Node* frame_state_or_result_;     // Only valid if mode_ == kFlags_deoptimize*
+  node_t frame_state_or_result_;    // Only valid if mode_ == kFlags_deoptimize*
                                     // or mode_ == kFlags_set.
-  BasicBlock* true_block_;          // Only valid if mode_ == kFlags_branch*.
-  BasicBlock* false_block_;         // Only valid if mode_ == kFlags_branch*.
+  block_t true_block_;              // Only valid if mode_ == kFlags_branch*.
+  block_t false_block_;             // Only valid if mode_ == kFlags_branch*.
   TrapId trap_id_;                  // Only valid if mode_ == kFlags_trap.
-  Node* true_value_;                // Only valid if mode_ == kFlags_select.
-  Node* false_value_;               // Only valid if mode_ == kFlags_select.
+  node_t true_value_;               // Only valid if mode_ == kFlags_select.
+  node_t false_value_;              // Only valid if mode_ == kFlags_select.
 };
 
 // This struct connects nodes of parameters which are going to be pushed on the
 // call stack with their parameter index in the call descriptor of the callee.
-struct PushParameter {
-  PushParameter(Node* n = nullptr,
-                LinkageLocation l = LinkageLocation::ForAnyRegister())
+template <typename Adapter>
+struct PushParameterT {
+  using node_t = typename Adapter::node_t;
+  PushParameterT(node_t n = {},
+                 LinkageLocation l = LinkageLocation::ForAnyRegister())
       : node(n), location(l) {}
 
-  Node* node;
+  node_t node;
   LinkageLocation location;
 };
 
 enum class FrameStateInputKind { kAny, kStackSlot };
 
 // Instruction selection generates an InstructionSequence for a given Schedule.
-class V8_EXPORT_PRIVATE InstructionSelector final {
+template <typename Adapter>
+class InstructionSelectorT final : public Adapter {
  public:
-  // Forward declarations.
-  class Features;
+  using OperandGenerator = OperandGeneratorT<Adapter>;
+  using PushParameter = PushParameterT<Adapter>;
+  using CallBuffer = CallBufferT<Adapter>;
+  using FlagsContinuation = FlagsContinuationT<Adapter>;
 
-  enum SourcePositionMode { kCallSourcePositions, kAllSourcePositions };
-  enum EnableScheduling { kDisableScheduling, kEnableScheduling };
-  enum EnableRootsRelativeAddressing {
-    kDisableRootsRelativeAddressing,
-    kEnableRootsRelativeAddressing
-  };
-  enum EnableSwitchJumpTable {
-    kDisableSwitchJumpTable,
-    kEnableSwitchJumpTable
-  };
-  enum EnableTraceTurboJson { kDisableTraceTurboJson, kEnableTraceTurboJson };
+  using schedule_t = typename Adapter::schedule_t;
+  using block_t = typename Adapter::block_t;
+  using block_range_t = typename Adapter::block_range_t;
+  using node_t = typename Adapter::node_t;
+  using id_t = typename Adapter::id_t;
 
-  InstructionSelector(
+  using Features = InstructionSelector::Features;
+
+  InstructionSelectorT(
       Zone* zone, size_t node_count, Linkage* linkage,
-      InstructionSequence* sequence, Schedule* schedule,
+      InstructionSequence* sequence, schedule_t schedule,
       SourcePositionTable* source_positions, Frame* frame,
-      EnableSwitchJumpTable enable_switch_jump_table, TickCounter* tick_counter,
-      JSHeapBroker* broker, size_t* max_unoptimized_frame_height,
-      size_t* max_pushed_argument_count,
-      SourcePositionMode source_position_mode = kCallSourcePositions,
+      InstructionSelector::EnableSwitchJumpTable enable_switch_jump_table,
+      TickCounter* tick_counter, JSHeapBroker* broker,
+      size_t* max_unoptimized_frame_height, size_t* max_pushed_argument_count,
+      InstructionSelector::SourcePositionMode source_position_mode =
+          InstructionSelector::kCallSourcePositions,
       Features features = SupportedFeatures(),
-      EnableScheduling enable_scheduling = v8_flags.turbo_instruction_scheduling
-                                               ? kEnableScheduling
-                                               : kDisableScheduling,
-      EnableRootsRelativeAddressing enable_roots_relative_addressing =
-          kDisableRootsRelativeAddressing,
-      EnableTraceTurboJson trace_turbo = kDisableTraceTurboJson);
+      InstructionSelector::EnableScheduling enable_scheduling =
+          v8_flags.turbo_instruction_scheduling
+              ? InstructionSelector::kEnableScheduling
+              : InstructionSelector::kDisableScheduling,
+      InstructionSelector::EnableRootsRelativeAddressing
+          enable_roots_relative_addressing =
+              InstructionSelector::kDisableRootsRelativeAddressing,
+      InstructionSelector::EnableTraceTurboJson trace_turbo =
+          InstructionSelector::kDisableTraceTurboJson);
 
   // Visit code for the entire graph with the included schedule.
   base::Optional<BailoutReason> SelectInstructions();
@@ -361,24 +466,12 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
       size_t input_count, InstructionOperand* inputs, size_t temp_count,
       InstructionOperand* temps, FlagsContinuation* cont);
 
-  void EmitIdentity(Node* node);
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, EmitIdentity)
+  void EmitIdentity(node_t node);
 
   // ===========================================================================
   // ============== Architecture-independent CPU feature methods. ==============
   // ===========================================================================
-
-  class Features final {
-   public:
-    Features() : bits_(0) {}
-    explicit Features(unsigned bits) : bits_(bits) {}
-    explicit Features(CpuFeature f) : bits_(1u << f) {}
-    Features(CpuFeature f1, CpuFeature f2) : bits_((1u << f1) | (1u << f2)) {}
-
-    bool Contains(CpuFeature f) const { return (bits_ & (1u << f)); }
-
-   private:
-    unsigned bits_;
-  };
 
   bool IsSupported(CpuFeature feature) const {
     return features_.Contains(feature);
@@ -388,11 +481,6 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   static Features SupportedFeatures() {
     return Features(CpuFeatures::SupportedFeatures());
   }
-
-  // TODO(sigurds) This should take a CpuFeatures argument.
-  static MachineOperatorBuilder::Flags SupportedMachineOperatorFlags();
-
-  static MachineOperatorBuilder::AlignmentRequirements AlignmentRequirements();
 
   // ===========================================================================
   // ============ Architecture-independent graph covering methods. =============
@@ -406,7 +494,8 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   // For pure nodes, CanCover(a,b) is checked to avoid duplicated execution:
   // If this is not the case, code for b must still be generated for other
   // users, and fusing is unlikely to improve performance.
-  bool CanCover(Node* user, Node* node) const;
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(bool, CanCover)
+  bool CanCover(node_t user, node_t node) const;
 
   // Used in pattern matching during code generation.
   // This function checks that {node} and {user} are in the same basic block,
@@ -431,27 +520,32 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   // visiting Word32Compare, we would then have to select an instruction for
   // OtherOp *afterwards*, which means we would attempt to use the result of
   // the add before we have defined it.
-  bool IsOnlyUserOfNodeInSameBlock(Node* user, Node* node) const;
+  bool IsOnlyUserOfNodeInSameBlock(node_t user, node_t node) const;
 
   // Checks if {node} was already defined, and therefore code was already
   // generated for it.
-  bool IsDefined(Node* node) const;
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(bool, IsDefined)
+  bool IsDefined(node_t node) const;
 
   // Checks if {node} has any uses, and therefore code has to be generated for
   // it.
-  bool IsUsed(Node* node) const;
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(bool, IsUsed)
+  bool IsUsed(node_t node) const;
 
   // Checks if {node} is currently live.
-  bool IsLive(Node* node) const { return !IsDefined(node) && IsUsed(node); }
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(bool, IsLive)
+  bool IsLive(node_t node) const { return !IsDefined(node) && IsUsed(node); }
 
   // Gets the effect level of {node}.
-  int GetEffectLevel(Node* node) const;
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(int, GetEffectLevel)
+  int GetEffectLevel(node_t node) const;
 
   // Gets the effect level of {node}, appropriately adjusted based on
   // continuation flags if the node is a branch.
-  int GetEffectLevel(Node* node, FlagsContinuation* cont) const;
+  int GetEffectLevel(node_t node, FlagsContinuation* cont) const;
 
-  int GetVirtualRegister(const Node* node);
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(int, GetVirtualRegister)
+  int GetVirtualRegister(node_t node);
   const std::map<NodeId, int> GetVirtualRegistersForTesting() const;
 
   // Check if we can generate loads and stores of ExternalConstants relative
@@ -468,17 +562,18 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   }
 
  private:
-  friend class OperandGenerator;
+  friend class OperandGeneratorT<Adapter>;
 
   bool UseInstructionScheduling() const {
-    return (enable_scheduling_ == kEnableScheduling) &&
+    return (enable_scheduling_ == InstructionSelector::kEnableScheduling) &&
            InstructionScheduler::SchedulerSupported();
   }
 
   void AppendDeoptimizeArguments(InstructionOperandVector* args,
-                                 DeoptimizeReason reason, NodeId node_id,
+                                 DeoptimizeReason reason, id_t node_id,
                                  FeedbackSource const& feedback,
-                                 FrameState frame_state);
+                                 node_t frame_state,
+                                 DeoptimizeKind kind = DeoptimizeKind::kEager);
 
   void EmitTableSwitch(const SwitchInfo& sw,
                        InstructionOperand const& index_operand);
@@ -487,45 +582,62 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
 
   void TryRename(InstructionOperand* op);
   int GetRename(int virtual_register);
-  void SetRename(const Node* node, const Node* rename);
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, SetRename)
+  void SetRename(node_t node, node_t rename);
   void UpdateRenames(Instruction* instruction);
   void UpdateRenamesInPhi(PhiInstruction* phi);
 
   // Inform the instruction selection that {node} was just defined.
-  void MarkAsDefined(Node* node);
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsDefined)
+  void MarkAsDefined(node_t node);
 
   // Inform the instruction selection that {node} has at least one use and we
   // will need to generate code for it.
-  void MarkAsUsed(Node* node);
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsUsed)
+  void MarkAsUsed(node_t node);
 
   // Sets the effect level of {node}.
-  void SetEffectLevel(Node* node, int effect_level);
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, SetEffectLevel)
+  void SetEffectLevel(node_t node, int effect_level);
 
   // Inform the register allocation of the representation of the value produced
   // by {node}.
-  void MarkAsRepresentation(MachineRepresentation rep, Node* node);
-  void MarkAsWord32(Node* node) {
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsRepresentation)
+  void MarkAsRepresentation(MachineRepresentation rep, node_t node);
+  void MarkAsRepresentation(turboshaft::RegisterRepresentation rep,
+                            node_t node) {
+    MarkAsRepresentation(rep.machine_representation(), node);
+  }
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsWord32)
+  void MarkAsWord32(node_t node) {
     MarkAsRepresentation(MachineRepresentation::kWord32, node);
   }
-  void MarkAsWord64(Node* node) {
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsWord64)
+  void MarkAsWord64(node_t node) {
     MarkAsRepresentation(MachineRepresentation::kWord64, node);
   }
-  void MarkAsFloat32(Node* node) {
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsFloat32)
+  void MarkAsFloat32(node_t node) {
     MarkAsRepresentation(MachineRepresentation::kFloat32, node);
   }
-  void MarkAsFloat64(Node* node) {
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsFloat64)
+  void MarkAsFloat64(node_t node) {
     MarkAsRepresentation(MachineRepresentation::kFloat64, node);
   }
-  void MarkAsSimd128(Node* node) {
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsSimd128)
+  void MarkAsSimd128(node_t node) {
     MarkAsRepresentation(MachineRepresentation::kSimd128, node);
   }
-  void MarkAsSimd256(Node* node) {
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsSimd256)
+  void MarkAsSimd256(node_t node) {
     MarkAsRepresentation(MachineRepresentation::kSimd256, node);
   }
-  void MarkAsTagged(Node* node) {
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsTagged)
+  void MarkAsTagged(node_t node) {
     MarkAsRepresentation(MachineRepresentation::kTagged, node);
   }
-  void MarkAsCompressed(Node* node) {
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, MarkAsCompressed)
+  void MarkAsCompressed(node_t node) {
     MarkAsRepresentation(MachineRepresentation::kCompressed, node);
   }
 
@@ -547,15 +659,15 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   // to the inputs and outputs of the call.
   // {call_code_immediate} to generate immediate operands to calls of code.
   // {call_address_immediate} to generate immediate operands to address calls.
-  void InitializeCallBuffer(Node* call, CallBuffer* buffer,
+  void InitializeCallBuffer(node_t call, CallBuffer* buffer,
                             CallBufferFlags flags, int stack_slot_delta = 0);
   bool IsTailCallAddressImmediate();
 
   void UpdateMaxPushedArgumentCount(size_t count);
 
-  FrameStateDescriptor* GetFrameStateDescriptor(FrameState node);
+  FrameStateDescriptor* GetFrameStateDescriptor(node_t node);
   size_t AddInputsToFrameStateDescriptor(FrameStateDescriptor* descriptor,
-                                         FrameState state, OperandGenerator* g,
+                                         node_t state, OperandGenerator* g,
                                          StateObjectDeduplicator* deduplicator,
                                          InstructionOperandVector* inputs,
                                          FrameStateInputKind kind, Zone* zone);
@@ -563,13 +675,13 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
                                          InstructionOperandVector* inputs,
                                          OperandGenerator* g,
                                          StateObjectDeduplicator* deduplicator,
-                                         Node* node, FrameStateInputKind kind,
+                                         node_t node, FrameStateInputKind kind,
                                          Zone* zone);
   size_t AddOperandToStateValueDescriptor(StateValueList* values,
                                           InstructionOperandVector* inputs,
                                           OperandGenerator* g,
                                           StateObjectDeduplicator* deduplicator,
-                                          Node* input, MachineType type,
+                                          node_t input, MachineType type,
                                           FrameStateInputKind kind, Zone* zone);
 
   // ===========================================================================
@@ -577,65 +689,270 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   // ===========================================================================
 
   // Visit nodes in the given block and generate code.
-  void VisitBlock(BasicBlock* block);
+  void VisitBlock(block_t block);
 
   // Visit the node for the control flow at the end of the block, generating
   // code if necessary.
-  void VisitControl(BasicBlock* block);
+  void VisitControl(block_t block);
 
   // Visit the node and generate code, if any.
-  void VisitNode(Node* node);
+  void VisitNode(node_t node);
 
   // Visit the node and generate code for IEEE 754 functions.
   void VisitFloat64Ieee754Binop(Node*, InstructionCode code);
   void VisitFloat64Ieee754Unop(Node*, InstructionCode code);
 
+  node_t FindProjection(node_t node, size_t projection_index);
+
+#define DECLARE_GENERATOR_T(x) void Visit##x(node_t node);
+  DECLARE_GENERATOR_T(Word32And)
+  DECLARE_GENERATOR_T(Word32Or)
+  DECLARE_GENERATOR_T(Word32Sar)
+  DECLARE_GENERATOR_T(Word64Shl)
+  DECLARE_GENERATOR_T(Word64Sar)
+  DECLARE_GENERATOR_T(Int32AddWithOverflow)
+  DECLARE_GENERATOR_T(Int32MulWithOverflow)
+  DECLARE_GENERATOR_T(Int64Add)
+  DECLARE_GENERATOR_T(Word32AtomicStore)
+  DECLARE_GENERATOR_T(Word64AtomicStore)
+  DECLARE_GENERATOR_T(Word32Equal)
+  DECLARE_GENERATOR_T(Int32LessThan)
+  DECLARE_GENERATOR_T(Int32LessThanOrEqual)
+  DECLARE_GENERATOR_T(Uint32LessThan)
+  DECLARE_GENERATOR_T(Uint32LessThanOrEqual)
+  DECLARE_GENERATOR_T(Uint64LessThan)
+  DECLARE_GENERATOR_T(Float64Sub)
+  DECLARE_GENERATOR_T(Float64Div)
+  DECLARE_GENERATOR_T(Float32Equal)
+  DECLARE_GENERATOR_T(Float32LessThan)
+  DECLARE_GENERATOR_T(Float32LessThanOrEqual)
+  DECLARE_GENERATOR_T(Float64Equal)
+  DECLARE_GENERATOR_T(Float64LessThan)
+  DECLARE_GENERATOR_T(Float64LessThanOrEqual)
+  DECLARE_GENERATOR_T(Load)
+  DECLARE_GENERATOR_T(StackPointerGreaterThan)
+  DECLARE_GENERATOR_T(Store)
+  DECLARE_GENERATOR_T(ProtectedStore)
+  DECLARE_GENERATOR_T(BitcastTaggedToWord)
+  DECLARE_GENERATOR_T(BitcastWordToTagged)
+  DECLARE_GENERATOR_T(ChangeInt32ToInt64)
+  DECLARE_GENERATOR_T(ChangeInt32ToFloat64)
+  DECLARE_GENERATOR_T(RoundFloat64ToInt32)
+#undef DECLARE_GENERATOR_T
+
 #define DECLARE_GENERATOR(x) void Visit##x(Node* node);
-  MACHINE_OP_LIST(DECLARE_GENERATOR)
+  // MACHINE_OP_LIST
+  MACHINE_UNOP_32_LIST(DECLARE_GENERATOR)
+  // MACHINE_BINOP_32_LIST
+  DECLARE_GENERATOR(Word32Xor)
+  DECLARE_GENERATOR(Word32Shl)
+  DECLARE_GENERATOR(Word32Shr)
+  DECLARE_GENERATOR(Word32Rol)
+  DECLARE_GENERATOR(Word32Ror)
+  DECLARE_GENERATOR(Int32Add)
+  DECLARE_GENERATOR(Int32Sub)
+  DECLARE_GENERATOR(Int32SubWithOverflow)
+  DECLARE_GENERATOR(Int32Mul)
+  DECLARE_GENERATOR(Int32MulHigh)
+  DECLARE_GENERATOR(Int32Div)
+  DECLARE_GENERATOR(Int32Mod)
+  DECLARE_GENERATOR(Uint32Div)
+  DECLARE_GENERATOR(Uint32Mod)
+  DECLARE_GENERATOR(Uint32MulHigh)
+  // END MACHINE_BINOP_32_LIST
+  // MACHINE_BINOP_64_LIST
+  DECLARE_GENERATOR(Word64And)
+  DECLARE_GENERATOR(Word64Or)
+  DECLARE_GENERATOR(Word64Xor)
+  DECLARE_GENERATOR(Word64Shr)
+  DECLARE_GENERATOR(Word64Rol)
+  DECLARE_GENERATOR(Word64Ror)
+  DECLARE_GENERATOR(Word64RolLowerable)
+  DECLARE_GENERATOR(Word64RorLowerable)
+  DECLARE_GENERATOR(Int64AddWithOverflow)
+  DECLARE_GENERATOR(Int64Sub)
+  DECLARE_GENERATOR(Int64SubWithOverflow)
+  DECLARE_GENERATOR(Int64Mul)
+  DECLARE_GENERATOR(Int64MulHigh)
+  DECLARE_GENERATOR(Int64MulWithOverflow)
+  DECLARE_GENERATOR(Int64Div)
+  DECLARE_GENERATOR(Int64Mod)
+  DECLARE_GENERATOR(Uint64Div)
+  DECLARE_GENERATOR(Uint64Mod)
+  DECLARE_GENERATOR(Uint64MulHigh)
+  // END MACHINE_BINOP_64_LIST
+  // MACHINE_COMPARE_BINOP_LIST
+  DECLARE_GENERATOR(Word64Equal)
+  DECLARE_GENERATOR(Int64LessThan)
+  DECLARE_GENERATOR(Int64LessThanOrEqual)
+  DECLARE_GENERATOR(Uint64LessThanOrEqual)
+  // END MACHINE_COMPARE_BINOP_LIST
+  MACHINE_FLOAT32_BINOP_LIST(DECLARE_GENERATOR)
+  MACHINE_FLOAT32_UNOP_LIST(DECLARE_GENERATOR)
+  // MACHINE_FLOAT64_BINOP_LIST
+  DECLARE_GENERATOR(Float64Atan2)
+  DECLARE_GENERATOR(Float64Max)
+  DECLARE_GENERATOR(Float64Min)
+  DECLARE_GENERATOR(Float64Add)
+  DECLARE_GENERATOR(Float64Mul)
+  DECLARE_GENERATOR(Float64Mod)
+  DECLARE_GENERATOR(Float64Pow)
+  // END MACHINE_FLOAT64_BINOP_LIST
+  MACHINE_FLOAT64_UNOP_LIST(DECLARE_GENERATOR)
+  // MACHINE_ATOMIC_OP_LIST
+  DECLARE_GENERATOR(Word32AtomicLoad)
+  DECLARE_GENERATOR(Word32AtomicExchange)
+  DECLARE_GENERATOR(Word32AtomicCompareExchange)
+  DECLARE_GENERATOR(Word32AtomicAdd)
+  DECLARE_GENERATOR(Word32AtomicSub)
+  DECLARE_GENERATOR(Word32AtomicAnd)
+  DECLARE_GENERATOR(Word32AtomicOr)
+  DECLARE_GENERATOR(Word32AtomicXor)
+  DECLARE_GENERATOR(Word32AtomicPairLoad)
+  DECLARE_GENERATOR(Word32AtomicPairStore)
+  DECLARE_GENERATOR(Word32AtomicPairAdd)
+  DECLARE_GENERATOR(Word32AtomicPairSub)
+  DECLARE_GENERATOR(Word32AtomicPairAnd)
+  DECLARE_GENERATOR(Word32AtomicPairOr)
+  DECLARE_GENERATOR(Word32AtomicPairXor)
+  DECLARE_GENERATOR(Word32AtomicPairExchange)
+  DECLARE_GENERATOR(Word32AtomicPairCompareExchange)
+  DECLARE_GENERATOR(Word64AtomicLoad)
+  DECLARE_GENERATOR(Word64AtomicAdd)
+  DECLARE_GENERATOR(Word64AtomicSub)
+  DECLARE_GENERATOR(Word64AtomicAnd)
+  DECLARE_GENERATOR(Word64AtomicOr)
+  DECLARE_GENERATOR(Word64AtomicXor)
+  DECLARE_GENERATOR(Word64AtomicExchange)
+  DECLARE_GENERATOR(Word64AtomicCompareExchange)
+  // END MACHINE_ATOMIC_OP_LIST
+  DECLARE_GENERATOR(AbortCSADcheck)
+  DECLARE_GENERATOR(DebugBreak)
+  DECLARE_GENERATOR(Comment)
+  DECLARE_GENERATOR(LoadImmutable)
+  DECLARE_GENERATOR(StorePair)
+  DECLARE_GENERATOR(StackSlot)
+  DECLARE_GENERATOR(Word32Popcnt)
+  DECLARE_GENERATOR(Word64Popcnt)
+  DECLARE_GENERATOR(Word64Clz)
+  DECLARE_GENERATOR(Word64Ctz)
+  DECLARE_GENERATOR(Word64ClzLowerable)
+  DECLARE_GENERATOR(Word64CtzLowerable)
+  DECLARE_GENERATOR(Word64ReverseBits)
+  DECLARE_GENERATOR(Word64ReverseBytes)
+  DECLARE_GENERATOR(Simd128ReverseBytes)
+  DECLARE_GENERATOR(Int64AbsWithOverflow)
+  DECLARE_GENERATOR(BitcastTaggedToWordForTagAndSmiBits)
+  DECLARE_GENERATOR(BitcastWordToTaggedSigned)
+  DECLARE_GENERATOR(TruncateFloat64ToWord32)
+  DECLARE_GENERATOR(ChangeFloat32ToFloat64)
+  DECLARE_GENERATOR(ChangeFloat64ToInt32)
+  DECLARE_GENERATOR(ChangeFloat64ToInt64)
+  DECLARE_GENERATOR(ChangeFloat64ToUint32)
+  DECLARE_GENERATOR(ChangeFloat64ToUint64)
+  DECLARE_GENERATOR(Float64SilenceNaN)
+  DECLARE_GENERATOR(TruncateFloat64ToInt64)
+  DECLARE_GENERATOR(TruncateFloat64ToUint32)
+  DECLARE_GENERATOR(TruncateFloat32ToInt32)
+  DECLARE_GENERATOR(TruncateFloat32ToUint32)
+  DECLARE_GENERATOR(TryTruncateFloat32ToInt64)
+  DECLARE_GENERATOR(TryTruncateFloat64ToInt64)
+  DECLARE_GENERATOR(TryTruncateFloat32ToUint64)
+  DECLARE_GENERATOR(TryTruncateFloat64ToUint64)
+  DECLARE_GENERATOR(TryTruncateFloat64ToInt32)
+  DECLARE_GENERATOR(TryTruncateFloat64ToUint32)
+  DECLARE_GENERATOR(BitcastWord32ToWord64)
+  DECLARE_GENERATOR(ChangeInt64ToFloat64)
+  DECLARE_GENERATOR(ChangeUint32ToFloat64)
+  DECLARE_GENERATOR(ChangeUint32ToUint64)
+  DECLARE_GENERATOR(TruncateFloat64ToFloat32)
+  DECLARE_GENERATOR(TruncateInt64ToInt32)
+  DECLARE_GENERATOR(RoundInt32ToFloat32)
+  DECLARE_GENERATOR(RoundInt64ToFloat32)
+  DECLARE_GENERATOR(RoundInt64ToFloat64)
+  DECLARE_GENERATOR(RoundUint32ToFloat32)
+  DECLARE_GENERATOR(RoundUint64ToFloat32)
+  DECLARE_GENERATOR(RoundUint64ToFloat64)
+  DECLARE_GENERATOR(BitcastFloat32ToInt32)
+  DECLARE_GENERATOR(BitcastFloat64ToInt64)
+  DECLARE_GENERATOR(BitcastInt32ToFloat32)
+  DECLARE_GENERATOR(BitcastInt64ToFloat64)
+  DECLARE_GENERATOR(Float64ExtractLowWord32)
+  DECLARE_GENERATOR(Float64ExtractHighWord32)
+  DECLARE_GENERATOR(Float64InsertLowWord32)
+  DECLARE_GENERATOR(Float64InsertHighWord32)
+  DECLARE_GENERATOR(Word32Select)
+  DECLARE_GENERATOR(Word64Select)
+  DECLARE_GENERATOR(Float32Select)
+  DECLARE_GENERATOR(Float64Select)
+  DECLARE_GENERATOR(LoadStackCheckOffset)
+  DECLARE_GENERATOR(LoadFramePointer)
+  DECLARE_GENERATOR(LoadParentFramePointer)
+  DECLARE_GENERATOR(LoadRootRegister)
+  DECLARE_GENERATOR(UnalignedLoad)
+  DECLARE_GENERATOR(UnalignedStore)
+  DECLARE_GENERATOR(Int32PairAdd)
+  DECLARE_GENERATOR(Int32PairSub)
+  DECLARE_GENERATOR(Int32PairMul)
+  DECLARE_GENERATOR(Word32PairShl)
+  DECLARE_GENERATOR(Word32PairShr)
+  DECLARE_GENERATOR(Word32PairSar)
+  DECLARE_GENERATOR(ProtectedLoad)
+  DECLARE_GENERATOR(LoadTrapOnNull)
+  DECLARE_GENERATOR(StoreTrapOnNull)
+  DECLARE_GENERATOR(MemoryBarrier)
+  DECLARE_GENERATOR(SignExtendWord8ToInt32)
+  DECLARE_GENERATOR(SignExtendWord16ToInt32)
+  DECLARE_GENERATOR(SignExtendWord8ToInt64)
+  DECLARE_GENERATOR(SignExtendWord16ToInt64)
+  DECLARE_GENERATOR(SignExtendWord32ToInt64)
+  DECLARE_GENERATOR(TraceInstruction)
+  // END MACHINE_OP_LIST
   MACHINE_SIMD128_OP_LIST(DECLARE_GENERATOR)
   MACHINE_SIMD256_OP_LIST(DECLARE_GENERATOR)
 #undef DECLARE_GENERATOR
 
   // Visit the load node with a value and opcode to replace with.
-  void VisitLoad(Node* node, Node* value, InstructionCode opcode);
+  void VisitLoad(node_t node, node_t value, InstructionCode opcode);
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void, VisitLoad)
   void VisitLoadTransform(Node* node, Node* value, InstructionCode opcode);
   void VisitFinishRegion(Node* node);
-  void VisitParameter(Node* node);
+  void VisitParameter(node_t node);
   void VisitIfException(Node* node);
   void VisitOsrValue(Node* node);
-  void VisitPhi(Node* node);
-  void VisitProjection(Node* node);
-  void VisitConstant(Node* node);
-  void VisitCall(Node* call, BasicBlock* handler = nullptr);
-  void VisitDeoptimizeIf(Node* node);
+  void VisitPhi(node_t node);
+  void VisitProjection(node_t node);
+  void VisitConstant(node_t node);
+  void VisitCall(node_t call, block_t handler = {});
+  void VisitDeoptimizeIf(node_t node);
   void VisitDeoptimizeUnless(Node* node);
   void VisitDynamicCheckMapsWithDeoptUnless(Node* node);
-  void VisitTrapIf(Node* node, TrapId trap_id);
-  void VisitTrapUnless(Node* node, TrapId trap_id);
+  void VisitTrapIf(node_t node, TrapId trap_id);
+  void VisitTrapUnless(node_t node, TrapId trap_id);
   void VisitTailCall(Node* call);
-  void VisitGoto(BasicBlock* target);
-  void VisitBranch(Node* input, BasicBlock* tbranch, BasicBlock* fbranch);
+  void VisitGoto(block_t target);
+  void VisitBranch(node_t input, block_t tbranch, block_t fbranch);
   void VisitSwitch(Node* node, const SwitchInfo& sw);
-  void VisitDeoptimize(DeoptimizeReason reason, NodeId node_id,
-                       FeedbackSource const& feedback, FrameState frame_state);
+  void VisitDeoptimize(DeoptimizeReason reason, id_t node_id,
+                       FeedbackSource const& feedback, node_t frame_state);
   void VisitSelect(Node* node);
-  void VisitReturn(Node* ret);
+  void VisitReturn(node_t node);
   void VisitThrow(Node* node);
   void VisitRetain(Node* node);
   void VisitUnreachable(Node* node);
   void VisitStaticAssert(Node* node);
   void VisitDeadValue(Node* node);
 
-  void TryPrepareScheduleFirstProjection(Node* maybe_projection);
+  void TryPrepareScheduleFirstProjection(node_t maybe_projection);
 
-  void VisitStackPointerGreaterThan(Node* node, FlagsContinuation* cont);
+  void VisitStackPointerGreaterThan(node_t node, FlagsContinuation* cont);
 
-  void VisitWordCompareZero(Node* user, Node* value, FlagsContinuation* cont);
+  void VisitWordCompareZero(node_t user, node_t value, FlagsContinuation* cont);
 
-  void EmitPrepareArguments(ZoneVector<compiler::PushParameter>* arguments,
-                            const CallDescriptor* call_descriptor, Node* node);
-  void EmitPrepareResults(ZoneVector<compiler::PushParameter>* results,
-                          const CallDescriptor* call_descriptor, Node* node);
+  void EmitPrepareArguments(ZoneVector<PushParameter>* arguments,
+                            const CallDescriptor* call_descriptor, node_t node);
+  void EmitPrepareResults(ZoneVector<PushParameter>* results,
+                          const CallDescriptor* call_descriptor, node_t node);
 
   // In LOONG64, calling convention uses free GP param register to pass
   // floating-point arguments when no FP param register is available. But
@@ -645,12 +962,12 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   // Moving floating-point param from GP param register to FPR to participate in
   // subsequent operations, whether CallCFunction or normal floating-point
   // operations.
-  void EmitMoveParamToFPR(Node* node, int index);
+  void EmitMoveParamToFPR(node_t node, int index);
 
   bool CanProduceSignalingNaN(Node* node);
 
   void AddOutputToSelectContinuation(OperandGenerator* g, int first_input_index,
-                                     Node* node);
+                                     node_t node);
 
   // ===========================================================================
   // ============= Vector instruction (SIMD) helper fns. =======================
@@ -668,7 +985,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
 
   // ===========================================================================
 
-  Schedule* schedule() const { return schedule_; }
+  schedule_t schedule() const { return schedule_; }
   Linkage* linkage() const { return linkage_; }
   InstructionSequence* sequence() const { return sequence_; }
   Zone* instruction_zone() const { return sequence()->zone(); }
@@ -681,12 +998,16 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
 
   void MarkPairProjectionsAsWord32(Node* node);
   bool IsSourcePositionUsed(Node* node);
-  void VisitWord32AtomicBinaryOperation(Node* node, ArchOpcode int8_op,
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void,
+                                          VisitWord32AtomicBinaryOperation)
+  void VisitWord32AtomicBinaryOperation(node_t node, ArchOpcode int8_op,
                                         ArchOpcode uint8_op,
                                         ArchOpcode int16_op,
                                         ArchOpcode uint16_op,
                                         ArchOpcode word32_op);
-  void VisitWord64AtomicBinaryOperation(Node* node, ArchOpcode uint8_op,
+  DECLARE_UNREACHABLE_TURBOSHAFT_FALLBACK(void,
+                                          VisitWord64AtomicBinaryOperation)
+  void VisitWord64AtomicBinaryOperation(node_t node, ArchOpcode uint8_op,
                                         ArchOpcode uint16_op,
                                         ArchOpcode uint32_op,
                                         ArchOpcode uint64_op);
@@ -705,10 +1026,10 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
 #endif  // V8_TARGET_ARCH_64_BIT
 
   struct FrameStateInput {
-    FrameStateInput(Node* node_, FrameStateInputKind kind_)
+    FrameStateInput(node_t node_, FrameStateInputKind kind_)
         : node(node_), kind(kind_) {}
 
-    Node* node;
+    node_t node;
     FrameStateInputKind kind;
 
     struct Hash {
@@ -735,10 +1056,10 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   Linkage* const linkage_;
   InstructionSequence* const sequence_;
   SourcePositionTable* const source_positions_;
-  SourcePositionMode const source_position_mode_;
+  InstructionSelector::SourcePositionMode const source_position_mode_;
   Features features_;
-  Schedule* const schedule_;
-  BasicBlock* current_block_;
+  schedule_t const schedule_;
+  block_t current_block_;
   ZoneVector<Instruction*> instructions_;
   InstructionOperandVector continuation_inputs_;
   InstructionOperandVector continuation_outputs_;
@@ -750,17 +1071,19 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   IntVector virtual_registers_;
   IntVector virtual_register_rename_;
   InstructionScheduler* scheduler_;
-  EnableScheduling enable_scheduling_;
-  EnableRootsRelativeAddressing enable_roots_relative_addressing_;
-  EnableSwitchJumpTable enable_switch_jump_table_;
-  ZoneUnorderedMap<FrameStateInput, CachedStateValues*, FrameStateInput::Hash,
-                   FrameStateInput::Equal>
+  InstructionSelector::EnableScheduling enable_scheduling_;
+  InstructionSelector::EnableRootsRelativeAddressing
+      enable_roots_relative_addressing_;
+  InstructionSelector::EnableSwitchJumpTable enable_switch_jump_table_;
+  ZoneUnorderedMap<FrameStateInput, CachedStateValues*,
+                   typename FrameStateInput::Hash,
+                   typename FrameStateInput::Equal>
       state_values_cache_;
 
   Frame* frame_;
   bool instruction_selection_failed_;
   ZoneVector<std::pair<int, int>> instr_origins_;
-  EnableTraceTurboJson trace_turbo_;
+  InstructionSelector::EnableTraceTurboJson trace_turbo_;
   TickCounter* const tick_counter_;
   // The broker is only used for unparking the LocalHeap for diagnostic printing
   // for failed StaticAsserts.

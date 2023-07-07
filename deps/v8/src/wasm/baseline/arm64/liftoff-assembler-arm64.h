@@ -1790,7 +1790,27 @@ bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
                                    LiftoffRegister true_value,
                                    LiftoffRegister false_value,
                                    ValueKind kind) {
-  return false;
+  if (kind != kI32 && kind != kI64 && kind != kF32 && kind != kF64)
+    return false;
+
+  Cmp(condition.W(), wzr);
+  switch (kind) {
+    default:
+      UNREACHABLE();
+    case kI32:
+      Csel(dst.gp().W(), true_value.gp().W(), false_value.gp().W(), ne);
+      break;
+    case kI64:
+      Csel(dst.gp().X(), true_value.gp().X(), false_value.gp().X(), ne);
+      break;
+    case kF32:
+      Fcsel(dst.fp().S(), true_value.fp().S(), false_value.fp().S(), ne);
+      break;
+    case kF64:
+      Fcsel(dst.fp().D(), true_value.fp().D(), false_value.fp().D(), ne);
+      break;
+  }
+  return true;
 }
 
 void LiftoffAssembler::emit_smi_check(Register obj, Label* target,
@@ -3424,18 +3444,20 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
 void LiftoffAssembler::RecordSpillsInSafepoint(
     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
     LiftoffRegList ref_spills, int spill_offset) {
-  int spill_space_size = 0;
-  bool needs_padding = (all_spills.GetGpList().Count() & 1) != 0;
+  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
+  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
+  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
+  bool needs_padding = (gp_spills.GetNumRegsSet() & 1) != 0;
   if (needs_padding) {
     spill_space_size += kSystemPointerSize;
     ++spill_offset;
   }
-  while (!all_spills.is_empty()) {
-    LiftoffRegister reg = all_spills.GetLastRegSet();
+  while (!gp_spills.is_empty()) {
+    LiftoffRegister reg = gp_spills.GetLastRegSet();
     if (ref_spills.has(reg)) {
       safepoint.DefineTaggedStackSlot(spill_offset);
     }
-    all_spills.clear(reg);
+    gp_spills.clear(reg);
     ++spill_offset;
     spill_space_size += kSystemPointerSize;
   }
@@ -3448,8 +3470,7 @@ void LiftoffAssembler::DropStackSlotsAndRet(uint32_t num_stack_slots) {
   Ret();
 }
 
-void LiftoffAssembler::CallC(const ValueKindSig* sig,
-                             const LiftoffRegister* args,
+void LiftoffAssembler::CallC(const ValueKindSig* sig, const VarState* args,
                              const LiftoffRegister* rets,
                              ValueKind out_argument_kind, int stack_bytes,
                              ExternalReference ext_ref) {
@@ -3458,12 +3479,30 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
   // Reserve space in the stack.
   Claim(total_size, 1);
 
-  int arg_bytes = 0;
+  int arg_offset = 0;
+  const VarState* current_arg = args;
   for (ValueKind param_kind : sig->parameters()) {
-    Poke(liftoff::GetRegFromType(*args++, param_kind), arg_bytes);
-    arg_bytes += value_kind_size(param_kind);
+    UseScratchRegisterScope temps(this);
+    CPURegister src = no_reg;
+    if (current_arg->is_reg()) {
+      src = liftoff::GetRegFromType(current_arg->reg(), param_kind);
+    } else if (current_arg->is_const()) {
+      DCHECK_EQ(kI32, param_kind);
+      if (current_arg->i32_const() == 0) {
+        src = wzr;
+      } else {
+        src = temps.AcquireW();
+        Mov(src.W(), current_arg->i32_const());
+      }
+    } else {
+      src = liftoff::AcquireByType(&temps, param_kind);
+      Ldr(src, liftoff::GetStackSlot(current_arg->offset()));
+    }
+    Poke(src, arg_offset);
+    ++current_arg;
+    arg_offset += value_kind_size(param_kind);
   }
-  DCHECK_LE(arg_bytes, stack_bytes);
+  DCHECK_LE(arg_offset, stack_bytes);
 
   // Pass a pointer to the buffer with the arguments to the C function.
   Mov(x0, sp);

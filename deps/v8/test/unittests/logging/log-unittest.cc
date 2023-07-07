@@ -327,7 +327,9 @@ TEST_F(TestWithIsolate, Issue23768) {
   i_isolate()->v8_file_logger()->LogCompiledFunctions();
 }
 
-static void ObjMethod1(const v8::FunctionCallbackInfo<v8::Value>& args) {}
+static void ObjMethod1(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+}
 
 TEST_F(LogTest, LogCallbacks) {
   {
@@ -504,7 +506,7 @@ class LogAllTest : public LogTest {
     i::v8_flags.log_all = true;
     i::v8_flags.log_deopt = true;
     i::v8_flags.turbo_inlining = false;
-    i::v8_flags.log_internal_timer_events = true;
+    i::v8_flags.log_timer_events = true;
     i::v8_flags.allow_natives_syntax = true;
     LogTest::SetUpTestSuite();
   }
@@ -1092,7 +1094,15 @@ TEST_F(LogMapsTest, LogMapsDetailsContexts) {
   }
 }
 
-TEST_F(LogTest, ConsoleTimeEvents) {
+class LogTimerTest : public LogTest {
+ public:
+  static void SetUpTestSuite() {
+    i::v8_flags.log_timer_events = true;
+    LogTest::SetUpTestSuite();
+  }
+};
+
+TEST_F(LogTimerTest, ConsoleTimeEvents) {
   {
     ScopedLoggerInitializer logger(isolate());
     {
@@ -1222,12 +1232,14 @@ TEST_F(LogTest, BuiltinsNotLoggedAsLazyCompile) {
 
     // Should only be logged as "Builtin" with a name, never as "Function".
     v8::base::SNPrintF(buffer, ",0x%" V8PRIxPTR ",%d,BooleanConstructor",
-                       builtin->InstructionStart(), builtin->InstructionSize());
+                       builtin->instruction_start(),
+                       builtin->instruction_size());
     CHECK(logger.ContainsLine(
         {"code-creation,Builtin,2,", std::string(buffer.begin())}));
 
     v8::base::SNPrintF(buffer, ",0x%" V8PRIxPTR ",%d,",
-                       builtin->InstructionStart(), builtin->InstructionSize());
+                       builtin->instruction_start(),
+                       builtin->instruction_size());
     CHECK(!logger.ContainsLine(
         {"code-creation,JS,2,", std::string(buffer.begin())}));
   }

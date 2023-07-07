@@ -4229,40 +4229,52 @@ void LiftoffAssembler::emit_f32x4_qfma(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
-  vmul(liftoff::GetSimd128Register(dst), liftoff::GetSimd128Register(src1),
+  UseScratchRegisterScope temps(this);
+  Simd128Register scratch =
+      dst == src3 ? temps.AcquireQ() : liftoff::GetSimd128Register(dst);
+  vmul(scratch, liftoff::GetSimd128Register(src1),
        liftoff::GetSimd128Register(src2));
   vadd(liftoff::GetSimd128Register(dst), liftoff::GetSimd128Register(src3),
-       liftoff::GetSimd128Register(dst));
+       scratch);
 }
 
 void LiftoffAssembler::emit_f32x4_qfms(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
-  vmul(liftoff::GetSimd128Register(dst), liftoff::GetSimd128Register(src1),
+  UseScratchRegisterScope temps(this);
+  Simd128Register scratch =
+      dst == src3 ? temps.AcquireQ() : liftoff::GetSimd128Register(dst);
+  vmul(scratch, liftoff::GetSimd128Register(src1),
        liftoff::GetSimd128Register(src2));
   vsub(liftoff::GetSimd128Register(dst), liftoff::GetSimd128Register(src3),
-       liftoff::GetSimd128Register(dst));
+       scratch);
 }
 
 void LiftoffAssembler::emit_f64x2_qfma(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
-  vmul(dst.low_fp(), src1.low_fp(), src2.low_fp());
-  vmul(dst.high_fp(), src1.high_fp(), src2.high_fp());
-  vadd(dst.low_fp(), src3.low_fp(), dst.low_fp());
-  vadd(dst.high_fp(), src3.high_fp(), dst.high_fp());
+  UseScratchRegisterScope temps(this);
+  Simd128Register scratch =
+      dst == src3 ? temps.AcquireQ() : liftoff::GetSimd128Register(dst);
+  vmul(scratch.low(), src1.low_fp(), src2.low_fp());
+  vmul(scratch.high(), src1.high_fp(), src2.high_fp());
+  vadd(dst.low_fp(), src3.low_fp(), scratch.low());
+  vadd(dst.high_fp(), src3.high_fp(), scratch.high());
 }
 
 void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
-  vmul(dst.low_fp(), src1.low_fp(), src2.low_fp());
-  vmul(dst.high_fp(), src1.high_fp(), src2.high_fp());
-  vsub(dst.low_fp(), src3.low_fp(), dst.low_fp());
-  vsub(dst.high_fp(), src3.high_fp(), dst.high_fp());
+  UseScratchRegisterScope temps(this);
+  Simd128Register scratch =
+      dst == src3 ? temps.AcquireQ() : liftoff::GetSimd128Register(dst);
+  vmul(scratch.low(), src1.low_fp(), src2.low_fp());
+  vmul(scratch.high(), src1.high_fp(), src2.high_fp());
+  vsub(dst.low_fp(), src3.low_fp(), scratch.low());
+  vsub(dst.high_fp(), src3.high_fp(), scratch.high());
 }
 
 void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
@@ -4330,13 +4342,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
 void LiftoffAssembler::RecordSpillsInSafepoint(
     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
     LiftoffRegList ref_spills, int spill_offset) {
-  int spill_space_size = 0;
-  while (!all_spills.is_empty()) {
-    LiftoffRegister reg = all_spills.GetLastRegSet();
+  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
+  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
+  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
+  while (!gp_spills.is_empty()) {
+    LiftoffRegister reg = gp_spills.GetLastRegSet();
     if (ref_spills.has(reg)) {
       safepoint.DefineTaggedStackSlot(spill_offset);
     }
-    all_spills.clear(reg);
+    gp_spills.clear(reg);
     ++spill_offset;
     spill_space_size += kSystemPointerSize;
   }
@@ -4349,8 +4363,7 @@ void LiftoffAssembler::DropStackSlotsAndRet(uint32_t num_stack_slots) {
   Ret();
 }
 
-void LiftoffAssembler::CallC(const ValueKindSig* sig,
-                             const LiftoffRegister* args,
+void LiftoffAssembler::CallC(const ValueKindSig* sig, const VarState* args,
                              const LiftoffRegister* rets,
                              ValueKind out_argument_kind, int stack_bytes,
                              ExternalReference ext_ref) {
@@ -4360,34 +4373,35 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
   // Reserve space in the stack.
   AllocateStackSpace(stack_bytes);
 
-  int arg_bytes = 0;
+  int arg_offset = 0;
+  const VarState* current_arg = args;
   for (ValueKind param_kind : sig->parameters()) {
-    switch (param_kind) {
-      case kI32:
-        str(args->gp(), MemOperand(sp, arg_bytes));
-        break;
-      case kI64:
-        str(args->low_gp(), MemOperand(sp, arg_bytes));
-        str(args->high_gp(), MemOperand(sp, arg_bytes + kSystemPointerSize));
-        break;
-      case kF32:
-        vstr(liftoff::GetFloatRegister(args->fp()), MemOperand(sp, arg_bytes));
-        break;
-      case kF64:
-        vstr(args->fp(), MemOperand(sp, arg_bytes));
-        break;
-      case kS128:
-        vstr(args->low_fp(), MemOperand(sp, arg_bytes));
-        vstr(args->high_fp(),
-             MemOperand(sp, arg_bytes + 2 * kSystemPointerSize));
-        break;
-      default:
-        UNREACHABLE();
+    MemOperand dst{sp, arg_offset};
+    if (current_arg->is_reg()) {
+      liftoff::Store(this, current_arg->reg(), dst, param_kind);
+    } else if (current_arg->is_const()) {
+      DCHECK_EQ(kI32, param_kind);
+      UseScratchRegisterScope temps(this);
+      Register src = temps.Acquire();
+      mov(src, Operand(current_arg->i32_const()));
+      str(src, dst);
+    } else {
+      // Stack to stack move.
+      UseScratchRegisterScope temps(this);
+      Register scratch = temps.Acquire();
+      MemOperand src = liftoff::GetStackSlot(current_arg->offset());
+      int words = SlotSizeForType(param_kind) / kSystemPointerSize;
+      do {
+        ldr(scratch, src);
+        str(scratch, dst);
+        src.set_offset(src.offset() + kSystemPointerSize);
+        dst.set_offset(dst.offset() + kSystemPointerSize);
+      } while (--words > 0);
     }
-    args++;
-    arg_bytes += value_kind_size(param_kind);
+    ++current_arg;
+    arg_offset += value_kind_size(param_kind);
   }
-  DCHECK_LE(arg_bytes, stack_bytes);
+  DCHECK_LE(arg_offset, stack_bytes);
 
   // Pass a pointer to the buffer with the arguments to the C function.
   mov(r0, sp);
@@ -4410,27 +4424,7 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
 
   // Load potential output value from the buffer on the stack.
   if (out_argument_kind != kVoid) {
-    switch (out_argument_kind) {
-      case kI32:
-        ldr(result_reg->gp(), MemOperand(sp));
-        break;
-      case kI64:
-        ldr(result_reg->low_gp(), MemOperand(sp));
-        ldr(result_reg->high_gp(), MemOperand(sp, kSystemPointerSize));
-        break;
-      case kF32:
-        vldr(liftoff::GetFloatRegister(result_reg->fp()), MemOperand(sp));
-        break;
-      case kF64:
-        vldr(result_reg->fp(), MemOperand(sp));
-        break;
-      case kS128:
-        vld1(Neon8, NeonListOperand(result_reg->low_fp(), 2),
-             NeonMemOperand(sp));
-        break;
-      default:
-        UNREACHABLE();
-    }
+    liftoff::Load(this, *result_reg, MemOperand{sp}, out_argument_kind);
   }
   add(sp, sp, Operand(stack_bytes));
 }

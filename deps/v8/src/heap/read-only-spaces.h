@@ -106,6 +106,13 @@ class ReadOnlyArtifacts {
   void set_read_only_heap(std::unique_ptr<ReadOnlyHeap> read_only_heap);
   ReadOnlyHeap* read_only_heap() const { return read_only_heap_.get(); }
 
+  void set_initial_next_unique_sfi_id(uint32_t id) {
+    initial_next_unique_sfi_id_ = id;
+  }
+  uint32_t initial_next_unique_sfi_id() const {
+    return initial_next_unique_sfi_id_;
+  }
+
   void InitializeChecksum(SnapshotData* read_only_snapshot_data);
   void VerifyChecksum(SnapshotData* read_only_snapshot_data,
                       bool read_only_heap_created);
@@ -117,6 +124,7 @@ class ReadOnlyArtifacts {
   AllocationStats stats_;
   std::unique_ptr<SharedReadOnlySpace> shared_read_only_space_;
   std::unique_ptr<ReadOnlyHeap> read_only_heap_;
+  uint32_t initial_next_unique_sfi_id_ = 0;
 #ifdef DEBUG
   // The checksum of the blob the read-only heap was deserialized from, if
   // any.
@@ -236,8 +244,6 @@ class ReadOnlySpace : public BaseSpace {
 
   Address FirstPageAddress() const { return pages_.front()->address(); }
 
-  void InitFromMemoryDump(Isolate* isolate, SnapshotByteSource* source);
-
   // Ensure the read only space has at least one allocated page
   void EnsurePage();
 
@@ -266,9 +272,12 @@ class ReadOnlySpace : public BaseSpace {
   AllocationResult AllocateRawUnaligned(int size_in_bytes);
   AllocationResult AllocateRawAligned(int size_in_bytes,
                                       AllocationAlignment alignment);
-
   HeapObject TryAllocateLinearlyAligned(int size_in_bytes,
                                         AllocationAlignment alignment);
+  void AllocateNextPage();
+  void AllocateNextPageAt(Address pos);
+  void FinalizeExternallyInitializedPage();
+  void FinalizeExternallyInitializedSpace();
   void EnsureSpaceForAllocation(int size_in_bytes);
   void FreeLinearAllocationArea();
 
@@ -276,7 +285,7 @@ class ReadOnlySpace : public BaseSpace {
   const size_t area_size_;
 
   friend class Heap;
-  friend class ReadOnlySerializer;  // For Unseal.
+  friend class ReadOnlyHeapImageDeserializer;
 };
 
 class SharedReadOnlySpace : public ReadOnlySpace {

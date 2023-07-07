@@ -66,11 +66,12 @@ void SortBlockData(std::vector<CoverageBlock>& v) {
   std::sort(v.begin(), v.end(), CompareCoverageBlock);
 }
 
-std::vector<CoverageBlock> GetSortedBlockData(SharedFunctionInfo shared) {
-  DCHECK(shared.HasCoverageInfo());
+std::vector<CoverageBlock> GetSortedBlockData(Isolate* isolate,
+                                              SharedFunctionInfo shared) {
+  DCHECK(shared.HasCoverageInfo(isolate));
 
   CoverageInfo coverage_info =
-      CoverageInfo::cast(shared.GetDebugInfo().coverage_info());
+      CoverageInfo::cast(shared.GetDebugInfo(isolate).coverage_info());
 
   std::vector<CoverageBlock> result;
   if (coverage_info.slot_count() == 0) return result;
@@ -378,11 +379,11 @@ void ClampToBinary(CoverageFunction* function) {
   }
 }
 
-void ResetAllBlockCounts(SharedFunctionInfo shared) {
-  DCHECK(shared.HasCoverageInfo());
+void ResetAllBlockCounts(Isolate* isolate, SharedFunctionInfo shared) {
+  DCHECK(shared.HasCoverageInfo(isolate));
 
   CoverageInfo coverage_info =
-      CoverageInfo::cast(shared.GetDebugInfo().coverage_info());
+      CoverageInfo::cast(shared.GetDebugInfo(isolate).coverage_info());
 
   for (int i = 0; i < coverage_info.slot_count(); i++) {
     coverage_info.ResetBlockCount(i);
@@ -409,7 +410,7 @@ bool IsBinaryMode(debug::CoverageMode mode) {
   }
 }
 
-void CollectBlockCoverageInternal(CoverageFunction* function,
+void CollectBlockCoverageInternal(Isolate* isolate, CoverageFunction* function,
                                   SharedFunctionInfo info,
                                   debug::CoverageMode mode) {
   DCHECK(IsBlockMode(mode));
@@ -419,7 +420,7 @@ void CollectBlockCoverageInternal(CoverageFunction* function,
   if (!function->HasNonEmptySourceRange()) return;
 
   function->has_block_coverage = true;
-  function->blocks = GetSortedBlockData(info);
+  function->blocks = GetSortedBlockData(isolate, info);
 
   // If in binary mode, only report counts of 0/1.
   if (mode == debug::CoverageMode::kBlockBinary) ClampToBinary(function);
@@ -467,12 +468,12 @@ void CollectBlockCoverageInternal(CoverageFunction* function,
   FilterEmptyRanges(function);
 }
 
-void CollectBlockCoverage(CoverageFunction* function, SharedFunctionInfo info,
-                          debug::CoverageMode mode) {
-  CollectBlockCoverageInternal(function, info, mode);
+void CollectBlockCoverage(Isolate* isolate, CoverageFunction* function,
+                          SharedFunctionInfo info, debug::CoverageMode mode) {
+  CollectBlockCoverageInternal(isolate, function, info, mode);
 
   // Reset all counters on the DebugInfo to zero.
-  ResetAllBlockCounts(info);
+  ResetAllBlockCounts(isolate, info);
 }
 
 void PrintBlockCoverage(const CoverageFunction* function,
@@ -542,13 +543,9 @@ void CollectAndMaybeResetCounts(Isolate* isolate,
         if (func.has_feedback_vector()) {
           count =
               static_cast<uint32_t>(func.feedback_vector().invocation_count());
-        } else if (func.raw_feedback_cell().interrupt_budget() <
-                   v8_flags.interrupt_budget_for_feedback_allocation) {
-          // TODO(jgruber): The condition above is no longer precise since we
-          // may use either the fixed interrupt_budget or
-          // v8_flags.interrupt_budget_factor_for_feedback_allocation. If the
-          // latter, we may incorrectly set a count of 1.
-          //
+        } else if (func.shared().HasBytecodeArray() &&
+                   func.raw_feedback_cell().interrupt_budget() <
+                       TieringManager::InterruptBudgetFor(isolate, func, {})) {
           // We haven't allocated feedback vector, but executed the function
           // atleast once. We don't have precise invocation count here.
           count = 1;
@@ -716,8 +713,8 @@ std::unique_ptr<Coverage> Coverage::Collect(
       Handle<String> name = SharedFunctionInfo::DebugName(isolate, info);
       CoverageFunction function(start, end, count, name);
 
-      if (IsBlockMode(collectionMode) && info->HasCoverageInfo()) {
-        CollectBlockCoverage(&function, *info, collectionMode);
+      if (IsBlockMode(collectionMode) && info->HasCoverageInfo(isolate)) {
+        CollectBlockCoverage(isolate, &function, *info, collectionMode);
       }
 
       // Only include a function range if itself or its parent function is

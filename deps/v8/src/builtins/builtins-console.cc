@@ -144,6 +144,7 @@ void ConsoleCall(
     Isolate* isolate, const internal::BuiltinArguments& args,
     void (debug::ConsoleDelegate::*func)(const v8::debug::ConsoleCallArguments&,
                                          const v8::debug::ConsoleContext&)) {
+  if (isolate->is_execution_terminating()) return;
   CHECK(!isolate->has_pending_exception());
   CHECK(!isolate->has_scheduled_exception());
   if (!isolate->console_delegate()) return;
@@ -166,7 +167,7 @@ void ConsoleCall(
 
 void LogTimerEvent(Isolate* isolate, BuiltinArguments args,
                    v8::LogEventStatus se) {
-  if (!isolate->v8_file_logger()->is_logging()) return;
+  if (!v8_flags.log_timer_events) return;
   HandleScope scope(isolate);
   std::unique_ptr<char[]> name;
   const char* raw_name = "default";

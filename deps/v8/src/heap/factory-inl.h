@@ -9,9 +9,11 @@
 
 // Clients of this interface shouldn't depend on lots of heap internals.
 // Do not include anything from src/heap here!
+// TODO(all): Remove the heap-inl.h include below.
 #include "src/execution/isolate-inl.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory-base-inl.h"
+#include "src/heap/heap-inl.h"  // For MaxNumberToStringCacheSize.
 #include "src/objects/feedback-cell.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/objects-inl.h"
@@ -29,11 +31,6 @@ namespace internal {
   }
 MUTABLE_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
-
-bool Factory::CodeBuilder::CompiledWithConcurrentBaseline() const {
-  return v8_flags.concurrent_sparkplug && kind_ == CodeKind::BASELINE &&
-         !local_isolate_->is_main_thread();
-}
 
 Handle<String> Factory::InternalizeString(Handle<String> string) {
   if (string->IsInternalizedString()) return string;

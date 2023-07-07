@@ -385,6 +385,7 @@ bool DebugEvaluate::IsSideEffectFreeIntrinsic(Runtime::FunctionId id) {
   V(ObjectIsExtensible)                       \
   V(RegExpInitializeAndCompile)               \
   V(StackGuard)                               \
+  V(HandleNoHeapWritesInterrupts)             \
   V(StringAdd)                                \
   V(StringCharCodeAt)                         \
   V(StringEqual)                              \
@@ -524,6 +525,7 @@ bool BytecodeHasNoSideEffect(interpreter::Bytecode bytecode) {
     case Bytecode::kToNumber:
     case Bytecode::kToNumeric:
     case Bytecode::kToString:
+    case Bytecode::kToBoolean:
     // Misc.
     case Bytecode::kIncBlockCounter:  // Coverage counters.
     case Bytecode::kForInEnumerate:
@@ -559,6 +561,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kObjectGetOwnPropertyNames:
     case Builtin::kObjectGetOwnPropertySymbols:
     case Builtin::kObjectGetPrototypeOf:
+    case Builtin::kObjectGroupBy:
     case Builtin::kObjectHasOwn:
     case Builtin::kObjectIs:
     case Builtin::kObjectIsExtensible:
@@ -581,7 +584,6 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kArrayPrototypeAt:
     case Builtin::kArrayPrototypeConcat:
     case Builtin::kArrayPrototypeEntries:
-    case Builtin::kArrayPrototypeFill:
     case Builtin::kArrayPrototypeFind:
     case Builtin::kArrayPrototypeFindIndex:
     case Builtin::kArrayPrototypeFindLast:
@@ -589,8 +591,6 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kArrayPrototypeFlat:
     case Builtin::kArrayPrototypeFlatMap:
     case Builtin::kArrayPrototypeJoin:
-    case Builtin::kArrayPrototypeGroup:
-    case Builtin::kArrayPrototypeGroupToMap:
     case Builtin::kArrayPrototypeKeys:
     case Builtin::kArrayPrototypeLastIndexOf:
     case Builtin::kArrayPrototypeSlice:
@@ -706,6 +706,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kDatePrototypeValueOf:
     // Map builtins.
     case Builtin::kMapConstructor:
+    case Builtin::kMapGroupBy:
     case Builtin::kMapPrototypeForEach:
     case Builtin::kMapPrototypeGet:
     case Builtin::kMapPrototypeHas:
@@ -916,6 +917,13 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kLocalePrototypeCaseFirst:
     case Builtin::kLocalePrototypeCollation:
     case Builtin::kLocalePrototypeCollations:
+    case Builtin::kLocalePrototypeGetCalendars:
+    case Builtin::kLocalePrototypeGetCollations:
+    case Builtin::kLocalePrototypeGetHourCycles:
+    case Builtin::kLocalePrototypeGetNumberingSystems:
+    case Builtin::kLocalePrototypeGetTextInfo:
+    case Builtin::kLocalePrototypeGetTimeZones:
+    case Builtin::kLocalePrototypeGetWeekInfo:
     case Builtin::kLocalePrototypeHourCycle:
     case Builtin::kLocalePrototypeHourCycles:
     case Builtin::kLocalePrototypeLanguage:
@@ -958,6 +966,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kSetPrototypeDelete:
     // Array builtins.
     case Builtin::kArrayIteratorPrototypeNext:
+    case Builtin::kArrayPrototypeFill:
     case Builtin::kArrayPrototypePop:
     case Builtin::kArrayPrototypePush:
     case Builtin::kArrayPrototypeReverse:
@@ -1069,7 +1078,7 @@ DebugInfo::SideEffectState DebugEvaluate::FunctionGetSideEffectState(
   } else if (info->IsApiFunction()) {
     Code code = info->GetCode(isolate);
     if (code.is_builtin()) {
-      return code.builtin_id() == Builtin::kHandleApiCall
+      return code.builtin_id() == Builtin::kHandleApiCallOrConstruct
                  ? DebugInfo::kHasNoSideEffect
                  : DebugInfo::kHasSideEffects;
     }
@@ -1140,6 +1149,8 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
     case Builtin::kGenericArrayToReversed:
     case Builtin::kGenericArrayWith:
     case Builtin::kGetProperty:
+    case Builtin::kGetPropertyWithReceiver:
+    case Builtin::kGroupByGeneric:
     case Builtin::kHasProperty:
     case Builtin::kCreateHTML:
     case Builtin::kNonNumberToNumber:

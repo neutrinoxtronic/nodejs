@@ -530,8 +530,7 @@ Handle<Object> JSDateTimeFormat::TimeZoneId(Isolate* isolate,
 
 namespace {
 Handle<String> GetCalendar(Isolate* isolate,
-                           const icu::SimpleDateFormat& simple_date_format,
-                           bool is_alt_calendar = false) {
+                           const icu::SimpleDateFormat& simple_date_format) {
   // getType() returns legacy calendar type name instead of LDML/BCP47 calendar
   // key values. intl.js maps them to BCP47 values for key "ca".
   // TODO(jshin): Consider doing it here, instead.
@@ -542,17 +541,9 @@ Handle<String> GetCalendar(Isolate* isolate,
   // and
   // http://www.unicode.org/repos/cldr/tags/latest/common/bcp47/calendar.xml
   if (calendar_str == "gregorian") {
-    if (is_alt_calendar) {
-      calendar_str = "iso8601";
-    } else {
-      calendar_str = "gregory";
-    }
+    calendar_str = "gregory";
   } else if (calendar_str == "ethiopic-amete-alem") {
     calendar_str = "ethioaa";
-  } else if (calendar_str == "islamic") {
-    if (is_alt_calendar) {
-      calendar_str = "islamic-rgsa";
-    }
   }
   return isolate->factory()->NewStringFromAsciiChecked(calendar_str.c_str());
 }
@@ -567,8 +558,7 @@ Handle<Object> GetTimeZone(Isolate* isolate,
 Handle<String> JSDateTimeFormat::Calendar(
     Isolate* isolate, Handle<JSDateTimeFormat> date_time_format) {
   return GetCalendar(isolate,
-                     *(date_time_format->icu_simple_date_format().raw()),
-                     date_time_format->alt_calendar());
+                     *(date_time_format->icu_simple_date_format().raw()));
 }
 
 Handle<Object> JSDateTimeFormat::TimeZone(
@@ -1795,7 +1785,8 @@ class CalendarCache {
     DCHECK_NOT_NULL(calendar.get());
 
     if (calendar->getDynamicClassID() ==
-        icu::GregorianCalendar::getStaticClassID()) {
+            icu::GregorianCalendar::getStaticClassID() ||
+        strcmp(calendar->getType(), "iso8601") == 0) {
       icu::GregorianCalendar* gc =
           static_cast<icu::GregorianCalendar*>(calendar.get());
       status = U_ZERO_ERROR;
@@ -1991,7 +1982,7 @@ std::unique_ptr<icu::DateIntervalFormat> LazyCreateDateIntervalFormat(
           isolate, 0, std::move(date_interval_format));
   date_time_format->set_icu_date_interval_format(*managed_interval_format);
   return std::unique_ptr<icu::DateIntervalFormat>(
-      (*managed_interval_format).raw()->clone());
+      managed_interval_format->raw()->clone());
 }
 
 JSDateTimeFormat::HourCycle HourCycleFromPattern(
@@ -2327,9 +2318,6 @@ MaybeHandle<JSDateTimeFormat> JSDateTimeFormat::New(
     icu_locale.setUnicodeKeywordValue("ca", calendar_str.get(), status);
     DCHECK(U_SUCCESS(status));
   }
-  bool alt_calendar =
-      strstr(icu_locale.getName(), "calendar=iso8601") != nullptr ||
-      strstr(icu_locale.getName(), "calendar=islamic-rgsa") != nullptr;
 
   if (numbering_system_str != nullptr &&
       Intl::IsValidNumberingSystem(numbering_system_str.get())) {
@@ -2639,7 +2627,6 @@ MaybeHandle<JSDateTimeFormat> JSDateTimeFormat::New(
     date_time_format->set_time_style(time_style);
   }
   date_time_format->set_hour_cycle(dateTimeFormatHourCycle);
-  date_time_format->set_alt_calendar(alt_calendar);
   date_time_format->set_locale(*locale_str);
   date_time_format->set_icu_locale(*managed_locale);
   date_time_format->set_icu_simple_date_format(*managed_format);
@@ -2741,10 +2728,8 @@ MaybeHandle<JSArray> FormatToPartsWithTemporalSupport(
   DateTimeValueRecord x_record;
   MAYBE_ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, x_record,
-      HandleDateTimeValue(
-          isolate, *format,
-          GetCalendar(isolate, *format, date_time_format->alt_calendar()), x,
-          method_name),
+      HandleDateTimeValue(isolate, *format, GetCalendar(isolate, *format), x,
+                          method_name),
       Handle<JSArray>());
 
   return FormatMillisecondsByKindToArray(isolate, *format, x_record.kind,
@@ -3069,8 +3054,8 @@ MaybeHandle<T> FormatRangeCommonWithTemporalSupport(
   // 6. Let x be ? HandleDateTimeValue(dateTimeFormat, x).
   icu::SimpleDateFormat* icu_simple_date_format =
       date_time_format->icu_simple_date_format().raw();
-  Handle<String> date_time_format_calendar = GetCalendar(
-      isolate, *icu_simple_date_format, date_time_format->alt_calendar());
+  Handle<String> date_time_format_calendar =
+      GetCalendar(isolate, *icu_simple_date_format);
   DateTimeValueRecord x_record;
   MAYBE_ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, x_record,

@@ -102,7 +102,7 @@ inline constexpr uint16_t ToLatin1Upper(uint16_t ch) {
 }
 
 template <typename Char>
-bool ToUpperFastASCII(const base::Vector<const Char>& src,
+bool ToUpperFastASCII(base::Vector<const Char> src,
                       Handle<SeqOneByteString> result) {
   // Do a faster loop for the case where all the characters are ASCII.
   uint16_t ored = 0;
@@ -118,7 +118,7 @@ bool ToUpperFastASCII(const base::Vector<const Char>& src,
 const uint16_t sharp_s = 0xDF;
 
 template <typename Char>
-bool ToUpperOneByte(const base::Vector<const Char>& src, uint8_t* dest,
+bool ToUpperOneByte(base::Vector<const Char> src, uint8_t* dest,
                     int* sharp_s_count) {
   // Still pretty-fast path for the input with non-ASCII Latin-1 characters.
 
@@ -144,7 +144,7 @@ bool ToUpperOneByte(const base::Vector<const Char>& src, uint8_t* dest,
 }
 
 template <typename Char>
-void ToUpperWithSharpS(const base::Vector<const Char>& src,
+void ToUpperWithSharpS(base::Vector<const Char> src,
                        Handle<SeqOneByteString> result) {
   int32_t dest_index = 0;
   for (auto it = src.begin(); it != src.end(); ++it) {
@@ -450,8 +450,7 @@ Maybe<icu::Locale> CreateICULocale(const std::string& bcp47_locale) {
   UErrorCode status = U_ZERO_ERROR;
 
   icu::Locale icu_locale = icu::Locale::forLanguageTag(bcp47_locale, status);
-  DCHECK(U_SUCCESS(status));
-  if (icu_locale.isBogus()) {
+  if (U_FAILURE(status) || icu_locale.isBogus()) {
     return Nothing<icu::Locale>();
   }
 
@@ -1566,20 +1565,18 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
   // 10. Set intlObj.[[MinimumIntegerDigits]] to mnid.
   digit_options.minimum_integer_digits = mnid;
 
-  if (v8_flags.harmony_intl_number_format_v3) {
-    // 11. Let roundingPriority be ? GetOption(options, "roundingPriority",
-    // "string", « "auto", "morePrecision", "lessPrecision" », "auto").
+  // 11. Let roundingPriority be ? GetOption(options, "roundingPriority",
+  // "string", « "auto", "morePrecision", "lessPrecision" », "auto").
 
-    Maybe<RoundingPriority> maybe_rounding_priority =
-        GetStringOption<RoundingPriority>(
-            isolate, options, "roundingPriority", "SetNumberFormatDigitOptions",
-            {"auto", "morePrecision", "lessPrecision"},
-            {RoundingPriority::kAuto, RoundingPriority::kMorePrecision,
-             RoundingPriority::kLessPrecision},
-            RoundingPriority::kAuto);
-    MAYBE_RETURN(maybe_rounding_priority, Nothing<NumberFormatDigitOptions>());
-    digit_options.rounding_priority = maybe_rounding_priority.FromJust();
-  }
+  Maybe<RoundingPriority> maybe_rounding_priority =
+      GetStringOption<RoundingPriority>(
+          isolate, options, "roundingPriority", "SetNumberFormatDigitOptions",
+          {"auto", "morePrecision", "lessPrecision"},
+          {RoundingPriority::kAuto, RoundingPriority::kMorePrecision,
+           RoundingPriority::kLessPrecision},
+          RoundingPriority::kAuto);
+  MAYBE_RETURN(maybe_rounding_priority, Nothing<NumberFormatDigitOptions>());
+  digit_options.rounding_priority = maybe_rounding_priority.FromJust();
 
   // 12. If mnsd is not undefined or mxsd is not undefined, then
   // a. Set hasSd to true.

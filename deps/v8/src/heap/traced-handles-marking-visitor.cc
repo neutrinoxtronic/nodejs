@@ -15,6 +15,8 @@ ConservativeTracedHandlesMarkingVisitor::
         Heap& heap, MarkingWorklists::Local& local_marking_worklist,
         cppgc::internal::CollectionType collection_type)
     : heap_(heap),
+      has_shared_space_(heap.isolate()->has_shared_space()),
+      is_shared_space_isolate_(heap.isolate()->is_shared_space_isolate()),
       marking_state_(*heap_.marking_state()),
       local_marking_worklist_(local_marking_worklist),
       traced_node_bounds_(heap.isolate()->traced_handles()->GetNodeBounds()),
@@ -49,9 +51,17 @@ void ConservativeTracedHandlesMarkingVisitor::VisitPointer(
       local_marking_worklist_.Push(heap_object);
     }
     if (V8_UNLIKELY(v8_flags.track_retaining_path)) {
-      heap_.AddRetainingRoot(Root::kWrapperTracing, heap_object);
+      heap_.AddRetainingRoot(Root::kTracedHandles, heap_object);
     }
   }
+}
+
+bool ConservativeTracedHandlesMarkingVisitor::ShouldMarkObject(
+    HeapObject object) const {
+  // Keep up-to-date with MarkCompactCollector::ShouldMarkObject.
+  if (V8_LIKELY(!has_shared_space_)) return true;
+  if (is_shared_space_isolate_) return true;
+  return !object.InAnySharedSpace();
 }
 
 }  // namespace internal

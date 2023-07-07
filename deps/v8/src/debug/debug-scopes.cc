@@ -36,7 +36,7 @@ ScopeIterator::ScopeIterator(Isolate* isolate, FrameInspector* frame_inspector,
 
 #if V8_ENABLE_WEBASSEMBLY
   // We should not instantiate a ScopeIterator for wasm frames.
-  DCHECK_NE(Script::TYPE_WASM, frame_inspector->GetScript()->type());
+  DCHECK_NE(Script::Type::kWasm, frame_inspector->GetScript()->type());
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   TryParseAndRetrieveScopes(strategy);
@@ -209,14 +209,14 @@ void ScopeIterator::TryParseAndRetrieveScopes(ReparseStrategy strategy) {
   }
 
   bool ignore_nested_scopes = false;
-  if (shared_info->HasBreakInfo() && frame_inspector_ != nullptr) {
+  if (shared_info->HasBreakInfo(isolate_) && frame_inspector_ != nullptr) {
     // The source position at return is always the end of the function,
     // which is not consistent with the current scope chain. Therefore all
     // nested with, catch and block contexts are skipped, and we can only
     // inspect the function scope.
     // This can only happen if we set a break point inside right before the
     // return, which requires a debug info to be available.
-    Handle<DebugInfo> debug_info(shared_info->GetDebugInfo(), isolate_);
+    Handle<DebugInfo> debug_info(shared_info->GetDebugInfo(isolate_), isolate_);
 
     // Find the break point where execution has stopped.
     BreakLocation location = BreakLocation::FromFrame(debug_info, GetFrame());
@@ -744,8 +744,7 @@ void ScopeIterator::DebugPrint() {
 
     case ScopeIterator::ScopeTypeScript:
       os << "Script:\n";
-      context_->global_object().native_context().script_context_table().Print(
-          os);
+      context_->native_context().script_context_table().Print(os);
       break;
 
     default:
@@ -767,9 +766,8 @@ int ScopeIterator::GetSourcePosition() const {
 }
 
 void ScopeIterator::VisitScriptScope(const Visitor& visitor) const {
-  Handle<JSGlobalObject> global(context_->global_object(), isolate_);
   Handle<ScriptContextTable> script_contexts(
-      global->native_context().script_context_table(), isolate_);
+      context_->native_context().script_context_table(), isolate_);
 
   // Skip the first script since that just declares 'this'.
   for (int context_index = 1;
@@ -1152,8 +1150,7 @@ bool ScopeIterator::SetModuleVariableValue(Handle<String> variable_name,
 bool ScopeIterator::SetScriptVariableValue(Handle<String> variable_name,
                                            Handle<Object> new_value) {
   Handle<ScriptContextTable> script_contexts(
-      context_->global_object().native_context().script_context_table(),
-      isolate_);
+      context_->native_context().script_context_table(), isolate_);
   VariableLookupResult lookup_result;
   if (script_contexts->Lookup(variable_name, &lookup_result)) {
     Handle<Context> script_context = ScriptContextTable::GetContext(

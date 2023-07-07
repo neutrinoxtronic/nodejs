@@ -47,7 +47,7 @@
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap.h"
 #include "src/heap/marking-worklist.h"
-#include "src/heap/sweeper.h"
+#include "src/heap/minor-mark-sweep.h"
 #include "src/heap/traced-handles-marking-visitor.h"
 #include "src/init/v8.h"
 #include "src/profiler/heap-profiler.h"
@@ -147,6 +147,10 @@ void CppHeap::CollectGarbageInYoungGenerationForTesting(
       internal::CppHeap::CollectionType::kMinor, stack_state);
 }
 
+v8::WrapperDescriptor CppHeap::wrapper_descriptor() const {
+  return internal::CppHeap::From(this)->wrapper_descriptor();
+}
+
 namespace internal {
 
 namespace {
@@ -202,7 +206,7 @@ class UnifiedHeapConcurrentMarker
   UnifiedHeapConcurrentMarker(
       cppgc::internal::HeapBase& heap, Heap* v8_heap,
       cppgc::internal::MarkingWorklists& marking_worklists,
-      cppgc::internal::IncrementalMarkingSchedule& incremental_marking_schedule,
+      ::heap::base::IncrementalMarkingSchedule& incremental_marking_schedule,
       cppgc::Platform* platform,
       UnifiedHeapMarkingState& unified_heap_marking_state,
       CppHeap::CollectionType collection_type)
@@ -524,6 +528,42 @@ class SweepingOnMutatorThreadForGlobalHandlesObserver final
   TracedHandles& traced_handles_;
 };
 
+class MoveListenerImpl final : public HeapProfilerNativeMoveListener,
+                               public cppgc::internal::MoveListener {
+ public:
+  MoveListenerImpl(HeapProfiler* profiler, CppHeap* heap)
+      : HeapProfilerNativeMoveListener(profiler), heap_(heap) {}
+  ~MoveListenerImpl() {
+    if (active_) {
+      heap_->UnregisterMoveListener(this);
+    }
+  }
+
+  // HeapProfilerNativeMoveListener implementation:
+  void StartListening() override {
+    if (active_) return;
+    active_ = true;
+    heap_->RegisterMoveListener(this);
+  }
+  void StopListening() override {
+    if (!active_) return;
+    active_ = false;
+    heap_->UnregisterMoveListener(this);
+  }
+
+  // cppgc::internal::MoveListener implementation:
+  void OnMove(uint8_t* from, uint8_t* to,
+              size_t size_including_header) override {
+    ObjectMoveEvent(reinterpret_cast<Address>(from),
+                    reinterpret_cast<Address>(to),
+                    static_cast<int>(size_including_header));
+  }
+
+ private:
+  CppHeap* heap_;
+  bool active_ = false;
+};
+
 }  // namespace
 
 void CppHeap::AttachIsolate(Isolate* isolate) {
@@ -533,13 +573,14 @@ void CppHeap::AttachIsolate(Isolate* isolate) {
   heap_ = isolate->heap();
   static_cast<CppgcPlatformAdapter*>(platform())
       ->SetIsolate(reinterpret_cast<v8::Isolate*>(isolate_));
-  if (isolate_->heap_profiler()) {
-    isolate_->heap_profiler()->AddBuildEmbedderGraphCallback(
-        &CppGraphBuilder::Run, this);
+  if (auto* heap_profiler = isolate_->heap_profiler()) {
+    heap_profiler->AddBuildEmbedderGraphCallback(&CppGraphBuilder::Run, this);
+    heap_profiler->set_native_move_listener(
+        std::make_unique<MoveListenerImpl>(heap_profiler, this));
   }
   SetMetricRecorder(std::make_unique<MetricRecorderAdapter>(*this));
   oom_handler().SetCustomHandler(&FatalOutOfMemoryHandlerImpl);
-  ReduceGCCapabilitiesFromFlags();
+  UpdateGCCapabilitiesFromFlags();
   sweeping_on_mutator_thread_observer_ =
       std::make_unique<SweepingOnMutatorThreadForGlobalHandlesObserver>(
           *this, *isolate_->traced_handles());
@@ -560,10 +601,10 @@ void CppHeap::DetachIsolate() {
 
   sweeping_on_mutator_thread_observer_.reset();
 
-  auto* heap_profiler = isolate_->heap_profiler();
-  if (heap_profiler) {
+  if (auto* heap_profiler = isolate_->heap_profiler()) {
     heap_profiler->RemoveBuildEmbedderGraphCallback(&CppGraphBuilder::Run,
                                                     this);
+    heap_profiler->set_native_move_listener(nullptr);
   }
   SetMetricRecorder(nullptr);
   isolate_ = nullptr;
@@ -612,7 +653,7 @@ CppHeap::SweepingType CppHeap::SelectSweepingType() const {
   return sweeping_support();
 }
 
-void CppHeap::ReduceGCCapabilitiesFromFlags() {
+void CppHeap::UpdateGCCapabilitiesFromFlags() {
   CHECK_IMPLIES(v8_flags.cppheap_concurrent_marking,
                 v8_flags.cppheap_incremental_marking);
   if (v8_flags.cppheap_concurrent_marking) {
@@ -699,7 +740,7 @@ MarkingWorklists::Local* GetV8MarkingWorklists(
   if (collection_type == cppgc::internal::CollectionType::kMajor) {
     return heap->mark_compact_collector()->local_marking_worklists();
   } else {
-    return heap->minor_mark_compact_collector()->local_marking_worklists();
+    return heap->minor_mark_sweep_collector()->local_marking_worklists();
   }
 }
 }  // namespace
@@ -796,7 +837,7 @@ void CppHeap::WriteBarrier(JSObject js_object) {
       ->mark_compact_collector()
       ->local_marking_worklists()
       ->cpp_marking_state()
-      ->MarkAndPushForWriteBarrier(type_slot, instance_slot);
+      ->MarkAndPush(type_slot, instance_slot);
 }
 
 namespace {
@@ -1125,11 +1166,11 @@ void CppHeap::CollectGarbage(cppgc::internal::GCConfig config) {
   if (in_no_gc_scope() || !isolate_) return;
 
   // TODO(mlippautz): Respect full config.
-  const int flags =
+  const auto flags =
       (config.free_memory_handling ==
        cppgc::internal::GCConfig::FreeMemoryHandling::kDiscardWherePossible)
-          ? Heap::kReduceMemoryFootprintMask
-          : Heap::kNoGCFlags;
+          ? GCFlag::kReduceMemoryFootprint
+          : GCFlag::kNoFlags;
   isolate_->heap()->CollectAllGarbage(
       flags, GarbageCollectionReason::kCppHeapAllocationFailure);
 }
@@ -1153,8 +1194,8 @@ void CppHeap::ResetCrossHeapRememberedSet() {
   cross_heap_remembered_set_.Reset(*isolate_);
 }
 
-void CppHeap::ReduceGCCapabilitiesFromFlagsForTesting() {
-  ReduceGCCapabilitiesFromFlags();
+void CppHeap::UpdateGCCapabilitiesFromFlagsForTesting() {
+  UpdateGCCapabilitiesFromFlags();
 }
 
 }  // namespace internal

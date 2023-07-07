@@ -1793,6 +1793,7 @@ bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
   V(i32x4_eq, I32x4Eq)                               \
   V(i32x4_gt_s, I32x4GtS)                            \
   V(i32x4_gt_u, I32x4GtU)                            \
+  V(i32x4_dot_i16x8_s, I32x4DotI16x8S)               \
   V(i16x8_add, I16x8Add)                             \
   V(i16x8_sub, I16x8Sub)                             \
   V(i16x8_mul, I16x8Mul)                             \
@@ -1810,6 +1811,7 @@ bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
   V(i16x8_sconvert_i32x4, I16x8SConvertI32x4)        \
   V(i16x8_uconvert_i32x4, I16x8UConvertI32x4)        \
   V(i16x8_rounding_average_u, I16x8RoundingAverageU) \
+  V(i16x8_q15mulr_sat_s, I16x8Q15MulRSatS)           \
   V(i8x16_add, I8x16Add)                             \
   V(i8x16_sub, I8x16Sub)                             \
   V(i8x16_min_s, I8x16MinS)                          \
@@ -1860,7 +1862,6 @@ SIMD_BINOP_LIST(EMIT_SIMD_BINOP)
   V(i32x4_extmul_low_i16x8_u, I32x4ExtMulLowI16x8U)   \
   V(i32x4_extmul_high_i16x8_s, I32x4ExtMulHighI16x8S) \
   V(i32x4_extmul_high_i16x8_u, I32x4ExtMulHighI16x8U) \
-  V(i32x4_dot_i16x8_s, I32x4DotI16x8S)                \
   V(i16x8_ne, I16x8Ne)                                \
   V(i16x8_ge_s, I16x8GeS)                             \
   V(i16x8_ge_u, I16x8GeU)                             \
@@ -1868,7 +1869,6 @@ SIMD_BINOP_LIST(EMIT_SIMD_BINOP)
   V(i16x8_extmul_low_i8x16_u, I16x8ExtMulLowI8x16U)   \
   V(i16x8_extmul_high_i8x16_s, I16x8ExtMulHighI8x16S) \
   V(i16x8_extmul_high_i8x16_u, I16x8ExtMulHighI8x16U) \
-  V(i16x8_q15mulr_sat_s, I16x8Q15MulRSatS)            \
   V(i16x8_dot_i8x16_i7x16_s, I16x8DotI8x16S)          \
   V(i8x16_ne, I8x16Ne)                                \
   V(i8x16_ge_s, I8x16GeS)                             \
@@ -2502,13 +2502,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
 void LiftoffAssembler::RecordSpillsInSafepoint(
     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
     LiftoffRegList ref_spills, int spill_offset) {
-  int spill_space_size = 0;
-  while (!all_spills.is_empty()) {
-    LiftoffRegister reg = all_spills.GetLastRegSet();
+  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
+  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
+  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
+  while (!gp_spills.is_empty()) {
+    LiftoffRegister reg = gp_spills.GetLastRegSet();
     if (ref_spills.has(reg)) {
       safepoint.DefineTaggedStackSlot(spill_offset);
     }
-    all_spills.clear(reg);
+    gp_spills.clear(reg);
     ++spill_offset;
     spill_space_size += kSystemPointerSize;
   }
@@ -2521,8 +2523,7 @@ void LiftoffAssembler::DropStackSlotsAndRet(uint32_t num_stack_slots) {
   Ret();
 }
 
-void LiftoffAssembler::CallC(const ValueKindSig* sig,
-                             const LiftoffRegister* args,
+void LiftoffAssembler::CallC(const ValueKindSig* sig, const VarState* args,
                              const LiftoffRegister* rets,
                              ValueKind out_argument_kind, int stack_bytes,
                              ExternalReference ext_ref) {
@@ -2540,32 +2541,49 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
 
   SubS64(sp, sp, Operand(size), r0);
 
-  int arg_bytes = 0;
+  int arg_offset = 0;
+  const VarState* current_arg = args;
   for (ValueKind param_kind : sig->parameters()) {
-    switch (param_kind) {
-      case kI32:
-        StoreU32(args->gp(), MemOperand(sp, arg_bytes), r0);
-        break;
-      case kI64:
-        StoreU64(args->gp(), MemOperand(sp, arg_bytes), r0);
-        break;
-      case kF32:
-        StoreF32(args->fp(), MemOperand(sp, arg_bytes), r0);
-        break;
-      case kF64:
-        StoreF64(args->fp(), MemOperand(sp, arg_bytes), r0);
-        break;
-      case kS128:
-        StoreSimd128(args->fp().toSimd(), MemOperand(sp, arg_bytes), r0);
-        break;
-      default:
-        UNREACHABLE();
+    MemOperand dst{sp, arg_offset};
+    if (current_arg->is_reg()) {
+      switch (param_kind) {
+        case kI32:
+          StoreU32(current_arg->reg().gp(), MemOperand(sp, arg_offset), r0);
+          break;
+        case kI64:
+          StoreU64(current_arg->reg().gp(), MemOperand(sp, arg_offset), r0);
+          break;
+        case kF32:
+          StoreF32(current_arg->reg().fp(), MemOperand(sp, arg_offset), r0);
+          break;
+        case kF64:
+          StoreF64(current_arg->reg().fp(), MemOperand(sp, arg_offset), r0);
+          break;
+        case kS128:
+          StoreSimd128(current_arg->reg().fp().toSimd(),
+                       MemOperand(sp, arg_offset), r0);
+          break;
+        default:
+          UNREACHABLE();
+      }
+    } else if (current_arg->is_const()) {
+      DCHECK_EQ(kI32, param_kind);
+      mov(ip, Operand(current_arg->i32_const()));
+      StoreU32(ip, dst, r0);
+    } else if (value_kind_size(current_arg->kind()) == 4) {
+      MemOperand src = liftoff::GetStackSlot(current_arg->offset());
+      LoadU32(ip, src, r0);
+      StoreU32(ip, dst, r0);
+    } else {
+      DCHECK_EQ(8, value_kind_size(current_arg->kind()));
+      MemOperand src = liftoff::GetStackSlot(current_arg->offset());
+      LoadU64(ip, src, r0);
+      StoreU64(ip, dst, r0);
     }
-    args++;
-    arg_bytes += value_kind_size(param_kind);
+    arg_offset += value_kind_size(param_kind);
+    ++current_arg;
   }
-
-  DCHECK_LE(arg_bytes, stack_bytes);
+  DCHECK_LE(arg_offset, stack_bytes);
 
   // Pass a pointer to the buffer with the arguments to the C function.
   mr(r3, sp);
@@ -2651,14 +2669,37 @@ void LiftoffAssembler::MaybeOSR() {}
 
 void LiftoffAssembler::emit_set_if_nan(Register dst, DoubleRegister src,
                                        ValueKind kind) {
-  UNIMPLEMENTED();
+  Label return_nan, done;
+  fcmpu(src, src);
+  bunordered(&return_nan);
+  b(&done);
+  bind(&return_nan);
+  StoreF32(src, MemOperand(dst), r0);
+  bind(&done);
 }
 
 void LiftoffAssembler::emit_s128_set_if_nan(Register dst, LiftoffRegister src,
                                             Register tmp_gp,
                                             LiftoffRegister tmp_s128,
                                             ValueKind lane_kind) {
-  UNIMPLEMENTED();
+  Label done;
+  if (lane_kind == kF32) {
+    xvcmpeqsp(tmp_s128.fp().toSimd(), src.fp().toSimd(), src.fp().toSimd(),
+              SetRC);
+  } else {
+    DCHECK_EQ(lane_kind, kF64);
+    xvcmpeqdp(tmp_s128.fp().toSimd(), src.fp().toSimd(), src.fp().toSimd(),
+              SetRC);
+  }
+  // CR_LT which is targeting cr6 bit 0, indicating if all lanes true (no lanes
+  // are NaN).
+  Condition all_lanes_true = lt;
+  b(all_lanes_true, &done, cr6);
+  // Do not use the src register as a Fp register to store a value.
+  // We use two different sets for Fp and Simd registers on PPC.
+  li(tmp_gp, Operand(1));
+  StoreU32(tmp_gp, MemOperand(dst), r0);
+  bind(&done);
 }
 
 void LiftoffStackSlots::Construct(int param_slots) {

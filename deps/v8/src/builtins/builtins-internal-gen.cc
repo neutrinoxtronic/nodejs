@@ -8,7 +8,7 @@
 #include "src/builtins/builtins.h"
 #include "src/codegen/code-stub-assembler.h"
 #include "src/codegen/interface-descriptors-inl.h"
-#include "src/codegen/macro-assembler.h"
+#include "src/codegen/macro-assembler-inl.h"
 #include "src/common/globals.h"
 #include "src/execution/frame-constants.h"
 #include "src/heap/memory-chunk.h"
@@ -82,25 +82,20 @@ TF_BUILTIN(DebugBreakTrampoline, CodeStubAssembler) {
   auto function = Parameter<JSFunction>(Descriptor::kJSTarget);
 
   // Check break-at-entry flag on the debug info.
+  TNode<ExternalReference> f =
+      ExternalConstant(ExternalReference::debug_break_at_entry_function());
+  TNode<ExternalReference> isolate_ptr =
+      ExternalConstant(ExternalReference::isolate_address(isolate()));
   TNode<SharedFunctionInfo> shared =
       CAST(LoadObjectField(function, JSFunction::kSharedFunctionInfoOffset));
-  TNode<Object> maybe_heap_object_or_smi =
-      LoadObjectField(shared, SharedFunctionInfo::kScriptOrDebugInfoOffset);
-  TNode<HeapObject> maybe_debug_info =
-      TaggedToHeapObject(maybe_heap_object_or_smi, &tailcall_to_shared);
-  GotoIfNot(HasInstanceType(maybe_debug_info, InstanceType::DEBUG_INFO_TYPE),
-            &tailcall_to_shared);
+  TNode<IntPtrT> result = UncheckedCast<IntPtrT>(
+      CallCFunction(f, MachineType::UintPtr(),
+                    std::make_pair(MachineType::Pointer(), isolate_ptr),
+                    std::make_pair(MachineType::TaggedPointer(), shared)));
+  GotoIf(IntPtrEqual(result, IntPtrConstant(0)), &tailcall_to_shared);
 
-  {
-    TNode<DebugInfo> debug_info = CAST(maybe_debug_info);
-    TNode<Smi> flags =
-        CAST(LoadObjectField(debug_info, DebugInfo::kFlagsOffset));
-    GotoIfNot(SmiToInt32(SmiAnd(flags, SmiConstant(DebugInfo::kBreakAtEntry))),
-              &tailcall_to_shared);
-
-    CallRuntime(Runtime::kDebugBreakAtEntry, context, function);
-    Goto(&tailcall_to_shared);
-  }
+  CallRuntime(Runtime::kDebugBreakAtEntry, context, function);
+  Goto(&tailcall_to_shared);
 
   BIND(&tailcall_to_shared);
   // Tail call into code object on the SharedFunctionInfo.
@@ -154,9 +149,8 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
     TNode<IntPtrT> cell;
     TNode<IntPtrT> mask;
     GetMarkBit(object, &cell, &mask);
-    TNode<Int32T> mask32 = TruncateIntPtrToInt32(mask);
     // Marked only requires checking a single bit here.
-    return Word32Equal(Word32And(Load<Int32T>(cell), mask32), Int32Constant(0));
+    return WordEqual(WordAnd(Load<IntPtrT>(cell), mask), IntPtrConstant(0));
   }
 
   void GetMarkBit(TNode<IntPtrT> object, TNode<IntPtrT>* cell,
@@ -168,18 +162,19 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
     {
       // Temp variable to calculate cell offset in bitmap.
       TNode<WordT> r0;
-      int shift = Bitmap::kBitsPerCellLog2 + kTaggedSizeLog2 -
-                  Bitmap::kBytesPerCellLog2;
+      int shift = MarkingBitmap::kBitsPerCellLog2 + kTaggedSizeLog2 -
+                  MarkingBitmap::kBytesPerCellLog2;
       r0 = WordShr(object, IntPtrConstant(shift));
       r0 = WordAnd(r0, IntPtrConstant((kPageAlignmentMask >> shift) &
-                                      ~(Bitmap::kBytesPerCell - 1)));
+                                      ~(MarkingBitmap::kBytesPerCell - 1)));
       *cell = IntPtrAdd(bitmap, Signed(r0));
     }
     {
       // Temp variable to calculate bit offset in cell.
       TNode<WordT> r1;
       r1 = WordShr(object, IntPtrConstant(kTaggedSizeLog2));
-      r1 = WordAnd(r1, IntPtrConstant((1 << Bitmap::kBitsPerCellLog2) - 1));
+      r1 = WordAnd(r1,
+                   IntPtrConstant((1 << MarkingBitmap::kBitsPerCellLog2) - 1));
       // It seems that LSB(e.g. cl) is automatically used, so no manual masking
       // is needed. Uncomment the following line otherwise.
       // WordAnd(r1, IntPtrConstant((1 << kBitsPerByte) - 1)));
@@ -761,7 +756,7 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
                                 TNode<IntPtrT> key_index,
                                 TNode<Context> context) {
     // Overwrite the entry itself (see NameDictionary::SetEntry).
-    TNode<Oddball> filler = TheHoleConstant();
+    TNode<Hole> filler = TheHoleConstant();
     DCHECK(RootsTable::IsImmortalImmovable(RootIndex::kTheHoleValue));
     StoreFixedArrayElement(properties, key_index, filler, SKIP_WRITE_BARRIER);
     StoreValueByKeyIndex<NameDictionary>(properties, key_index, filler,
@@ -1373,6 +1368,38 @@ void Builtins::Generate_MaglevOnStackReplacement(MacroAssembler* masm) {
 }
 #endif  // V8_TARGET_ARCH_X64
 
+#ifdef V8_ENABLE_MAGLEV
+void Builtins::Generate_MaglevOptimizeCodeOrTailCallOptimizedCodeSlot(
+    MacroAssembler* masm) {
+  using D = MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor;
+  Register flags = D::GetRegisterParameter(D::kFlags);
+  Register feedback_vector = D::GetRegisterParameter(D::kFeedbackVector);
+  masm->AssertFeedbackVector(feedback_vector);
+  masm->OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+  masm->Trap();
+}
+#else
+// static
+void Builtins::Generate_MaglevFunctionEntryStackCheck(MacroAssembler* masm,
+                                                      bool save_new_target) {
+  masm->Trap();
+}
+void Builtins::Generate_MaglevOptimizeCodeOrTailCallOptimizedCodeSlot(
+    MacroAssembler* masm) {
+  masm->Trap();
+}
+#endif  // V8_ENABLE_MAGLEV
+
+void Builtins::Generate_MaglevFunctionEntryStackCheck_WithoutNewTarget(
+    MacroAssembler* masm) {
+  Generate_MaglevFunctionEntryStackCheck(masm, false);
+}
+
+void Builtins::Generate_MaglevFunctionEntryStackCheck_WithNewTarget(
+    MacroAssembler* masm) {
+  Generate_MaglevFunctionEntryStackCheck(masm, true);
+}
+
 // ES6 [[Get]] operation.
 TF_BUILTIN(GetProperty, CodeStubAssembler) {
   auto object = Parameter<Object>(Descriptor::kObject);
@@ -1389,9 +1416,12 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
           TNode<Name> unique_name, Label* next_holder, Label* if_bailout) {
         TVARIABLE(Object, var_value);
         Label if_found(this);
+        // If we get here then it's guaranteed that |object| (and thus the
+        // |receiver|) is a JSReceiver.
         TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
-                          &var_value, next_holder, if_bailout);
+                          &var_value, next_holder, if_bailout,
+                          kExpectingJSReceiver);
         BIND(&if_found);
         Return(var_value.value());
       };
@@ -1446,7 +1476,8 @@ TF_BUILTIN(GetPropertyWithReceiver, CodeStubAssembler) {
         Label if_found(this);
         TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
-                          &var_value, next_holder, if_bailout);
+                          &var_value, next_holder, if_bailout,
+                          kExpectingAnyReceiver);
         BIND(&if_found);
         Return(var_value.value());
       };
@@ -1573,9 +1604,8 @@ TF_BUILTIN(FindNonDefaultConstructorOrConstruct, CodeStubAssembler) {
   Label found_default_base_ctor(this, &constructor),
       found_something_else(this, &constructor);
 
-  FindNonDefaultConstructorOrConstruct(context, this_function, constructor,
-                                       &found_default_base_ctor,
-                                       &found_something_else);
+  FindNonDefaultConstructor(this_function, constructor,
+                            &found_default_base_ctor, &found_something_else);
 
   BIND(&found_default_base_ctor);
   {

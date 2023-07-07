@@ -36,13 +36,13 @@ MaybeHandle<Derived> OrderedHashTable<Derived, entrysize>::Allocate(
       allocation);
   Handle<Derived> table = Handle<Derived>::cast(backing_store);
   DisallowGarbageCollection no_gc;
-  auto raw_table = *table;
+  Tagged<Derived> raw_table = *table;
   for (int i = 0; i < num_buckets; ++i) {
-    raw_table.set(HashTableStartIndex() + i, Smi::FromInt(kNotFound));
+    raw_table->set(HashTableStartIndex() + i, Smi::FromInt(kNotFound));
   }
-  raw_table.SetNumberOfBuckets(num_buckets);
-  raw_table.SetNumberOfElements(0);
-  raw_table.SetNumberOfDeletedElements(0);
+  raw_table->SetNumberOfBuckets(num_buckets);
+  raw_table->SetNumberOfElements(0);
+  raw_table->SetNumberOfDeletedElements(0);
   return table;
 }
 
@@ -59,15 +59,16 @@ MaybeHandle<Derived> OrderedHashTable<Derived, entrysize>::AllocateEmpty(
       allocation);
   Handle<Derived> table = Handle<Derived>::cast(backing_store);
   DisallowHandleAllocation no_gc;
-  auto raw_table = *table;
-  raw_table.SetNumberOfBuckets(0);
-  raw_table.SetNumberOfElements(0);
-  raw_table.SetNumberOfDeletedElements(0);
+  Tagged<Derived> raw_table = *table;
+  raw_table->SetNumberOfBuckets(0);
+  raw_table->SetNumberOfElements(0);
+  raw_table->SetNumberOfDeletedElements(0);
   return table;
 }
 
 template <class Derived, int entrysize>
-MaybeHandle<Derived> OrderedHashTable<Derived, entrysize>::EnsureGrowable(
+MaybeHandle<Derived>
+OrderedHashTable<Derived, entrysize>::EnsureCapacityForAdding(
     Isolate* isolate, Handle<Derived> table) {
   DCHECK(!table->IsObsolete());
 
@@ -173,41 +174,41 @@ MaybeHandle<OrderedHashSet> OrderedHashSet::Add(Isolate* isolate,
   int hash;
   {
     DisallowGarbageCollection no_gc;
-    auto raw_key = *key;
-    auto raw_table = *table;
-    hash = raw_key.GetOrCreateHash(isolate).value();
-    if (raw_table.NumberOfElements() > 0) {
-      int raw_entry = raw_table.HashToEntryRaw(hash);
+    Tagged<Object> raw_key = *key;
+    Tagged<OrderedHashSet> raw_table = *table;
+    hash = raw_key->GetOrCreateHash(isolate).value();
+    if (raw_table->NumberOfElements() > 0) {
+      int raw_entry = raw_table->HashToEntryRaw(hash);
       // Walk the chain of the bucket and try finding the key.
       while (raw_entry != kNotFound) {
-        Object candidate_key = raw_table.KeyAt(InternalIndex(raw_entry));
+        Object candidate_key = raw_table->KeyAt(InternalIndex(raw_entry));
         // Do not add if we have the key already
         if (candidate_key.SameValueZero(raw_key)) return table;
-        raw_entry = raw_table.NextChainEntryRaw(raw_entry);
+        raw_entry = raw_table->NextChainEntryRaw(raw_entry);
       }
     }
   }
 
   MaybeHandle<OrderedHashSet> table_candidate =
-      OrderedHashSet::EnsureGrowable(isolate, table);
+      OrderedHashSet::EnsureCapacityForAdding(isolate, table);
   if (!table_candidate.ToHandle(&table)) {
     CHECK(isolate->has_pending_exception());
     return table_candidate;
   }
   DisallowGarbageCollection no_gc;
-  auto raw_table = *table;
+  Tagged<OrderedHashSet> raw_table = *table;
   // Read the existing bucket values.
-  int bucket = raw_table.HashToBucket(hash);
-  int previous_entry = raw_table.HashToEntryRaw(hash);
-  int nof = raw_table.NumberOfElements();
+  int bucket = raw_table->HashToBucket(hash);
+  int previous_entry = raw_table->HashToEntryRaw(hash);
+  int nof = raw_table->NumberOfElements();
   // Insert a new entry at the end,
-  int new_entry = nof + raw_table.NumberOfDeletedElements();
-  int new_index = raw_table.EntryToIndexRaw(new_entry);
-  raw_table.set(new_index, *key);
-  raw_table.set(new_index + kChainOffset, Smi::FromInt(previous_entry));
+  int new_entry = nof + raw_table->NumberOfDeletedElements();
+  int new_index = raw_table->EntryToIndexRaw(new_entry);
+  raw_table->set(new_index, *key);
+  raw_table->set(new_index + kChainOffset, Smi::FromInt(previous_entry));
   // and point the bucket to the new entry.
-  raw_table.set(HashTableStartIndex() + bucket, Smi::FromInt(new_entry));
-  raw_table.SetNumberOfElements(nof + 1);
+  raw_table->set(HashTableStartIndex() + bucket, Smi::FromInt(new_entry));
+  raw_table->SetNumberOfElements(nof + 1);
   return table;
 }
 
@@ -395,25 +396,25 @@ MaybeHandle<OrderedHashMap> OrderedHashMap::Add(Isolate* isolate,
   }
 
   MaybeHandle<OrderedHashMap> table_candidate =
-      OrderedHashMap::EnsureGrowable(isolate, table);
+      OrderedHashMap::EnsureCapacityForAdding(isolate, table);
   if (!table_candidate.ToHandle(&table)) {
     return table_candidate;
   }
   DisallowGarbageCollection no_gc;
-  auto raw_table = *table;
+  Tagged<OrderedHashMap> raw_table = *table;
   // Read the existing bucket values.
-  int bucket = raw_table.HashToBucket(hash);
-  int previous_entry = raw_table.HashToEntryRaw(hash);
-  int nof = raw_table.NumberOfElements();
+  int bucket = raw_table->HashToBucket(hash);
+  int previous_entry = raw_table->HashToEntryRaw(hash);
+  int nof = raw_table->NumberOfElements();
   // Insert a new entry at the end,
-  int new_entry = nof + raw_table.NumberOfDeletedElements();
-  int new_index = raw_table.EntryToIndexRaw(new_entry);
-  raw_table.set(new_index, *key);
-  raw_table.set(new_index + kValueOffset, *value);
-  raw_table.set(new_index + kChainOffset, Smi::FromInt(previous_entry));
+  int new_entry = nof + raw_table->NumberOfDeletedElements();
+  int new_index = raw_table->EntryToIndexRaw(new_entry);
+  raw_table->set(new_index, *key);
+  raw_table->set(new_index + kValueOffset, *value);
+  raw_table->set(new_index + kChainOffset, Smi::FromInt(previous_entry));
   // and point the bucket to the new entry.
-  raw_table.set(HashTableStartIndex() + bucket, Smi::FromInt(new_entry));
-  raw_table.SetNumberOfElements(nof + 1);
+  raw_table->set(HashTableStartIndex() + bucket, Smi::FromInt(new_entry));
+  raw_table->SetNumberOfElements(nof + 1);
   return table;
 }
 
@@ -461,32 +462,32 @@ MaybeHandle<OrderedNameDictionary> OrderedNameDictionary::Add(
   DCHECK(table->FindEntry(isolate, *key).is_not_found());
 
   MaybeHandle<OrderedNameDictionary> table_candidate =
-      OrderedNameDictionary::EnsureGrowable(isolate, table);
+      OrderedNameDictionary::EnsureCapacityForAdding(isolate, table);
   if (!table_candidate.ToHandle(&table)) {
     return table_candidate;
   }
   DisallowGarbageCollection no_gc;
-  auto raw_table = *table;
+  Tagged<OrderedNameDictionary> raw_table = *table;
   // Read the existing bucket values.
   int hash = key->hash();
-  int bucket = raw_table.HashToBucket(hash);
-  int previous_entry = raw_table.HashToEntryRaw(hash);
-  int nof = raw_table.NumberOfElements();
+  int bucket = raw_table->HashToBucket(hash);
+  int previous_entry = raw_table->HashToEntryRaw(hash);
+  int nof = raw_table->NumberOfElements();
   // Insert a new entry at the end,
-  int new_entry = nof + raw_table.NumberOfDeletedElements();
-  int new_index = raw_table.EntryToIndexRaw(new_entry);
-  raw_table.set(new_index, *key);
-  raw_table.set(new_index + kValueOffset, *value);
+  int new_entry = nof + raw_table->NumberOfDeletedElements();
+  int new_index = raw_table->EntryToIndexRaw(new_entry);
+  raw_table->set(new_index, *key);
+  raw_table->set(new_index + kValueOffset, *value);
 
   // TODO(gsathya): Optimize how PropertyDetails are stored in this
   // dictionary to save memory (by reusing padding?) and performance
   // (by not doing the Smi conversion).
-  raw_table.set(new_index + kPropertyDetailsOffset, details.AsSmi());
+  raw_table->set(new_index + kPropertyDetailsOffset, details.AsSmi());
 
-  raw_table.set(new_index + kChainOffset, Smi::FromInt(previous_entry));
+  raw_table->set(new_index + kChainOffset, Smi::FromInt(previous_entry));
   // and point the bucket to the new entry.
-  raw_table.set(HashTableStartIndex() + bucket, Smi::FromInt(new_entry));
-  raw_table.SetNumberOfElements(nof + 1);
+  raw_table->set(HashTableStartIndex() + bucket, Smi::FromInt(new_entry));
+  raw_table->SetNumberOfElements(nof + 1);
   return table;
 }
 
@@ -571,7 +572,7 @@ MaybeHandle<OrderedNameDictionary> OrderedNameDictionary::AllocateEmpty(
 }
 
 template V8_EXPORT_PRIVATE MaybeHandle<OrderedHashSet>
-OrderedHashTable<OrderedHashSet, 1>::EnsureGrowable(
+OrderedHashTable<OrderedHashSet, 1>::EnsureCapacityForAdding(
     Isolate* isolate, Handle<OrderedHashSet> table);
 
 template V8_EXPORT_PRIVATE Handle<OrderedHashSet>
@@ -595,7 +596,7 @@ template V8_EXPORT_PRIVATE InternalIndex
 OrderedHashTable<OrderedHashSet, 1>::FindEntry(Isolate* isolate, Object key);
 
 template V8_EXPORT_PRIVATE MaybeHandle<OrderedHashMap>
-OrderedHashTable<OrderedHashMap, 2>::EnsureGrowable(
+OrderedHashTable<OrderedHashMap, 2>::EnsureCapacityForAdding(
     Isolate* isolate, Handle<OrderedHashMap> table);
 
 template V8_EXPORT_PRIVATE Handle<OrderedHashMap>
@@ -623,7 +624,7 @@ OrderedHashTable<OrderedNameDictionary, 3>::Shrink(
     Isolate* isolate, Handle<OrderedNameDictionary> table);
 
 template MaybeHandle<OrderedNameDictionary>
-OrderedHashTable<OrderedNameDictionary, 3>::EnsureGrowable(
+OrderedHashTable<OrderedNameDictionary, 3>::EnsureCapacityForAdding(
     Isolate* isolate, Handle<OrderedNameDictionary> table);
 
 template V8_EXPORT_PRIVATE InternalIndex
@@ -668,7 +669,7 @@ void SmallOrderedHashTable<Derived>::Initialize(Isolate* isolate,
          PaddingSize());
 
   Address hashtable_start = GetHashTableStartAddress(capacity);
-  memset(reinterpret_cast<byte*>(hashtable_start), kNotFound,
+  memset(reinterpret_cast<uint8_t*>(hashtable_start), kNotFound,
          num_buckets + num_chains);
 
   MemsetTagged(RawField(DataTableStartOffset()),
@@ -705,23 +706,23 @@ MaybeHandle<SmallOrderedHashSet> SmallOrderedHashSet::Add(
   }
 
   DisallowGarbageCollection no_gc;
-  auto raw_table = *table;
+  Tagged<SmallOrderedHashSet> raw_table = *table;
   int hash = key->GetOrCreateHash(isolate).value();
-  int nof = raw_table.NumberOfElements();
+  int nof = raw_table->NumberOfElements();
 
   // Read the existing bucket values.
-  int bucket = raw_table.HashToBucket(hash);
-  int previous_entry = raw_table.HashToFirstEntry(hash);
+  int bucket = raw_table->HashToBucket(hash);
+  int previous_entry = raw_table->HashToFirstEntry(hash);
 
   // Insert a new entry at the end,
-  int new_entry = nof + raw_table.NumberOfDeletedElements();
+  int new_entry = nof + raw_table->NumberOfDeletedElements();
 
-  raw_table.SetDataEntry(new_entry, SmallOrderedHashSet::kKeyIndex, *key);
-  raw_table.SetFirstEntry(bucket, new_entry);
-  raw_table.SetNextEntry(new_entry, previous_entry);
+  raw_table->SetDataEntry(new_entry, SmallOrderedHashSet::kKeyIndex, *key);
+  raw_table->SetFirstEntry(bucket, new_entry);
+  raw_table->SetNextEntry(new_entry, previous_entry);
 
   // and update book keeping.
-  raw_table.SetNumberOfElements(nof + 1);
+  raw_table->SetNumberOfElements(nof + 1);
 
   return table;
 }
@@ -749,24 +750,24 @@ MaybeHandle<SmallOrderedHashMap> SmallOrderedHashMap::Add(
     }
   }
   DisallowGarbageCollection no_gc;
-  auto raw_table = *table;
+  Tagged<SmallOrderedHashMap> raw_table = *table;
   int hash = key->GetOrCreateHash(isolate).value();
-  int nof = raw_table.NumberOfElements();
+  int nof = raw_table->NumberOfElements();
 
   // Read the existing bucket values.
-  int bucket = raw_table.HashToBucket(hash);
-  int previous_entry = raw_table.HashToFirstEntry(hash);
+  int bucket = raw_table->HashToBucket(hash);
+  int previous_entry = raw_table->HashToFirstEntry(hash);
 
   // Insert a new entry at the end,
-  int new_entry = nof + raw_table.NumberOfDeletedElements();
+  int new_entry = nof + raw_table->NumberOfDeletedElements();
 
-  raw_table.SetDataEntry(new_entry, SmallOrderedHashMap::kValueIndex, *value);
-  raw_table.SetDataEntry(new_entry, SmallOrderedHashMap::kKeyIndex, *key);
-  raw_table.SetFirstEntry(bucket, new_entry);
-  raw_table.SetNextEntry(new_entry, previous_entry);
+  raw_table->SetDataEntry(new_entry, SmallOrderedHashMap::kValueIndex, *value);
+  raw_table->SetDataEntry(new_entry, SmallOrderedHashMap::kKeyIndex, *key);
+  raw_table->SetFirstEntry(bucket, new_entry);
+  raw_table->SetNextEntry(new_entry, previous_entry);
 
   // and update book keeping.
-  raw_table.SetNumberOfElements(nof + 1);
+  raw_table->SetNumberOfElements(nof + 1);
 
   return table;
 }
